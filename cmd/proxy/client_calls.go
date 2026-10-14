@@ -47,8 +47,8 @@ func (g *GroupAssigner) Begin(source string) string {
 func (g *GroupAssigner) End(source string) {
   g.mu.Lock()
   defer g.mu.Unlock()
-  if grp, ok := g.byClient[source]; ok {
-    grp.runningCalls--
-    grp.lastCallEndedAt = time.Now()
+  if activity, ok := g.byClient[source]; ok {
+    if activity.runningCalls > 0 { activity.runningCalls-- }
+    activity.lastCallEndedAt = time.Now()
   }
 }
