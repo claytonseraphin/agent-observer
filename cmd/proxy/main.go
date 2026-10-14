@@ -204,6 +204,8 @@ func debugHandler(w http.ResponseWriter, r *http.Request) {
 
 
 func main() {
+  startCleanup(time.Minute, time.Hour)
+
   mux := http.NewServeMux()
   mux.HandleFunc("/debug/requests", debugHandler)
   mux.HandleFunc("/", handler)

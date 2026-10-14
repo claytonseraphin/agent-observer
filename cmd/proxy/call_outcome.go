@@ -52,7 +52,7 @@ func OutcomeFromResponse(resp *http.Response) CallOutcome {
 
 	body, restored := peekBody(resp.Body, maxPeekBytes)
 	resp.Body = restored
-  fmt.Println("Body: %v", string(body))
+  //fmt.Println("Body: %v", string(body))
 	return outcomeFromRPCBody(body)
 }
 
