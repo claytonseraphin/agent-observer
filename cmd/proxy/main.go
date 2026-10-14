@@ -6,7 +6,7 @@ import(
   "net/http"
   "net/http/httputil"
   "net/url"
-  "slices"
+  //"slices"
   "strings"
   "log"
   "strconv"
@@ -24,41 +24,71 @@ var routes = map[string]*url.URL{
   "education":      mustParse("http://localhost:8003"),
 }
 
-type RequestRecord struct {
-  Agents     []string     `json:"agents"`
+
+type CallRecord struct {
+  Agent        string
+  Kind         string
+  StartedAt    time.Time
+  EndedAt      time.Time
+  Status       string   // processing, success, failed
+  Error        string
+}
+
+type GroupRecord struct {
+  Origin       string   // Client or inferred
+  Calls        []*CallRecord
 }
 
 type Tracker struct {
   mu          sync.Mutex
-  records     map[string]*RequestRecord
+  groups     map[string]*GroupRecord
 }
 
 
-func (r *RequestRecord) Count() int {
-  return len(r.Agents)
-}
-
-
-func NewTracker() *Tracker {
-  return &Tracker{records: map[string]*RequestRecord{}}
-}
-
-func (t *Tracker) Record(key, agent string) (int, []string) {
+func (t *Tracker) StartCall(groupID, origin, agent, kind string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	rec, ok := t.records[key]
+	group, ok := t.groups[groupID]
 	if !ok {
-		rec = &RequestRecord{}
-		t.records[key] = rec
+		group = &GroupRecord{Origin: origin}
+		t.groups[groupID] = group
 	}
-	if !slices.Contains(rec.Agents, agent) {
-		rec.Agents = append(rec.Agents, agent)
+
+	call := &CallRecord{
+		Agent:     agent,
+    Kind:      kind,
+		StartedAt: time.Now(),
+		Status:    StatusProcessing,
 	}
-	return len(rec.Agents), slices.Clone(rec.Agents)
+	group.Calls = append(group.Calls, call)
+
+	return len(group.Calls) - 1
+}
+
+func (t *Tracker) FinishCall(groupID string, callIndex int, outcome CallOutcome) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	g, ok := t.groups[groupID]
+	if !ok || callIndex < 0 || callIndex >= len(g.Calls) {
+		return
+	}
+	call := g.Calls[callIndex]
+	if call.Status != StatusProcessing {
+		return // already finished, keep the first outcome
+	}
+	call.EndedAt = time.Now()
+	call.Status = outcome.Status
+	call.Error = outcome.Error
+}
+
+func NewTracker() *Tracker {
+	return &Tracker{groups: map[string]*GroupRecord{}}
 }
 
 var tracker = NewTracker()
+
 var assigner = NewGroupAssigner(10 * time.Second)
 
 func mustParse(s string) *url.URL {
@@ -94,17 +124,28 @@ func handler(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  if r.Method == http.MethodPost {
-    origin := "client"
-  	key := r.Header.Get("X-Trace-Id")
-  	if key == "" {
-      origin = "inferred"
-      address := clientAddress(r)
-      key = assigner.Begin(address)
-      defer assigner.End(address)
+  var groupID string
+  callIndex := -1
+  address := clientAddress(r)
+
+  isCall := r.Method == http.MethodPost
+  isDiscovery := r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "agent-card.json")
+
+  if isCall || isDiscovery {
+  	kind := "call"
+  	if isDiscovery {
+  		kind = "discovery"
   	}
-  	count, names := tracker.Record(key, name)
-  	log.Printf("group=%s (%s) agents=%d names=%v", key, origin, count, names)
+
+  	origin := "client"
+  	groupID = r.Header.Get("X-Trace-Id")
+  	if groupID == "" {
+  		origin = "inferred"
+  		groupID = assigner.Begin(address)
+  		defer assigner.End(address)
+  	}
+  	callIndex = tracker.StartCall(groupID, origin, name, kind)
+  	log.Printf("group=%s origin=%s agent=%s kind=%s", groupID, origin, name, kind)
   }
 
   start := time.Now()
@@ -116,14 +157,27 @@ func handler(w http.ResponseWriter, r *http.Request) {
       pr.Out.Header.Del("Accept-Encoding")
     },
     ModifyResponse: func(resp *http.Response) error {
-      log.Printf("%s %s -> %s %d (%s)", r.Method, r.URL.Path, name,
-          resp.StatusCode, time.Since(start))
-        if strings.HasSuffix(r.URL.Path, "agent-card.json") &&
-        	resp.StatusCode == http.StatusOK &&
-        	strings.Contains(resp.Header.Get("Content-Type"), "json") {
-        	return rewriteCard(resp, target.String()+"/", publicBase+"/"+name+"/")
-        }
-        return nil
+    	log.Printf("%s %s -> %s %d (%s)", r.Method, r.URL.Path, name,
+    		resp.StatusCode, time.Since(start))
+
+    	// Only POSTs have a callIndex. Card GETs keep -1 and are skipped.
+    	if callIndex >= 0 {
+    		tracker.FinishCall(groupID, callIndex, OutcomeFromResponse(resp))
+    	}
+
+    	if strings.HasSuffix(r.URL.Path, "agent-card.json") &&
+    		resp.StatusCode == http.StatusOK &&
+    		strings.Contains(resp.Header.Get("Content-Type"), "json") {
+    		return rewriteCard(resp, target.String()+"/", publicBase+"/"+name+"/")
+    	}
+    	return nil
+    },
+    ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
+    	log.Printf("%s %s -> %s failed: %v", req.Method, req.URL.Path, name, err)
+    	if callIndex >= 0 {
+    		tracker.FinishCall(groupID, callIndex, OutcomeFromError(err))
+    	}
+    	http.Error(w, "upstream error", http.StatusBadGateway)
     },
   }
   proxy.ServeHTTP(w, r)
@@ -144,10 +198,8 @@ func rewriteCard(resp *http.Response, from, to string) error {
 }
 
 func debugHandler(w http.ResponseWriter, r *http.Request) {
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tracker.records)
+  w.Header().Set("Content-Type", "application/json")
+  json.NewEncoder(w).Encode(tracker.Snapshot())
 }
 
 
@@ -157,51 +209,3 @@ func main() {
   mux.HandleFunc("/", handler)
   log.Fatal(http.ListenAndServe(":8080", mux))
 }
-// type ReverseProxy struct {
-//   backends      []*url.URL
-//   current       uint64
-// }
-//
-//
-// func NewReverseProxy(backendURLs []string) *ReverseProxy {
-//   urls := make([]*url.URL, len(backendURLs))
-//
-//   for i, u := range backendURLs {
-//     parsedURL, err := url.Parse(u)
-//     if err != nil {
-//       log.Fatalf("Invalid URL: %v", err)
-//     }
-//
-//     urls[i] = parsedURL
-//   }
-//
-//   return &ReverseProxy{backends: urls}
-// }
-//
-//
-// func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-//   var index int
-//
-//   switch {
-//   case strings.HasPrefix(r.URL.Host, "localhost:8001"):
-//     index = 0
-//     atomic.AddUint64(&p.current, 1)
-//
-//   case strings.HasPrefix(r.URL.Host, "localhost:8002"):
-//     index = 1
-//     atomic.AddUint64(&p.current, 1)
-//
-//   default:
-//     return
-//   }
-//
-//   proxy := httputil.NewSingleHostReverseProxy(p.backends[index])
-//   proxy.ServeHTTP(w, r)
-// }
-//
-//
-// func main() {
-//   backends := []string{"http://localhost:8001/", "http://localhost:8002/"}
-//   proxy := NewReverseProxy(backends)
-//   log.Fatal(http.ListenAndServe(":8080", proxy))
-// }
