@@ -2,7 +2,6 @@ package main
 
 import (
   "time"
-  "log"
 )
 
 // A safe rule has two conditions:
