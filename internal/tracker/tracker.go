@@ -1,10 +1,10 @@
-package main
+package tracker
 
 import (
   "time"
   "sync"
-  "net/url"
-  "log"
+
+  "github.com/claytonseraphin/agent-observer/internal/outcome"
 )
 
 type CallRecord struct {
@@ -41,14 +41,14 @@ func (t *Tracker) StartCall(groupID, origin, agent, kind string) int {
 		Agent:     agent,
     Kind:      kind,
 		StartedAt: time.Now(),
-		Status:    StatusProcessing,
+		Status:    outcome.StatusProcessing,
 	}
 	group.Calls = append(group.Calls, call)
 
 	return len(group.Calls) - 1
 }
 
-func (t *Tracker) FinishCall(groupID string, callIndex int, outcome CallOutcome) {
+func (t *Tracker) FinishCall(groupID string, callIndex int, result outcome.CallOutcome) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -57,26 +57,14 @@ func (t *Tracker) FinishCall(groupID string, callIndex int, outcome CallOutcome)
 		return
 	}
 	call := g.Calls[callIndex]
-	if call.Status != StatusProcessing {
+	if call.Status != outcome.StatusProcessing {
 		return // already finished, keep the first outcome
 	}
 	call.EndedAt = time.Now()
-	call.Status = outcome.Status
-	call.Error = outcome.Error
+	call.Status = result.Status
+	call.Error = result.Error
 }
 
 func NewTracker() *Tracker {
 	return &Tracker{groups: map[string]*GroupRecord{}}
-}
-
-var tracker = NewTracker()
-
-var assigner = NewGroupAssigner(10 * time.Second)
-
-func mustParse(s string) *url.URL {
-  u, err := url.Parse(s)
-  if err != nil {
-    log.Fatal(err)
-  }
-  return u
 }

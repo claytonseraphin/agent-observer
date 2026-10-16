@@ -1,4 +1,4 @@
-package main
+package grouping
 
 
 import (
@@ -51,4 +51,28 @@ func (g *GroupAssigner) End(source string) {
     if activity.runningCalls > 0 { activity.runningCalls-- }
     activity.lastCallEndedAt = time.Now()
   }
+}
+
+// GroupAssigner Cleanup
+// Cleanup removes clients that have no running calls and have been
+// quiet for longer than maxIdle.
+func (g *GroupAssigner) Cleanup(maxIdle time.Duration) {
+  g.mu.Lock()
+  defer g.mu.Unlock()
+
+  // Never forget a client sooner than the idle gap, or the gap logic breaks.
+  if maxIdle < g.idleGap {
+    maxIdle = g.idleGap
+  }
+  cutoff := time.Now().Add(-maxIdle)
+
+  for address, activity := range g.byClient {
+    if activity.runningCalls > 0 {
+      continue // still has a call in flight
+    }
+    if activity.lastCallEndedAt.Before(cutoff) {
+      delete(g.byClient, address)
+    }
+  }
+  //log.Printf("assigner clients=%d", len(g.byClient))
 }
