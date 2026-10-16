@@ -1,9 +1,12 @@
-package main
+package api
 
 import (
   "time"
   "net/http"
   "encoding/json"
+
+  "github.com/claytonseraphin/agent-observer/internal/tracker"
+  "github.com/claytonseraphin/agent-observer/internal/outcome"
 )
 
 type GroupSummary struct {
@@ -23,12 +26,12 @@ type Groups struct {
 
 // groupTimes returns when the group started and, if every call has
 // finished, when the last one ended (nil while anything is running).
-func groupTimes(calls []CallView) (time.Time, *time.Time) {
+func groupTimes(calls []tracker.CallView) (time.Time, *time.Time) {
   started := calls[0].StartedAt
 
   var latest time.Time
   for _, c := range calls {
-    if c.Status == StatusProcessing || c.EndedAt == nil {
+    if c.Status == outcome.StatusProcessing || c.EndedAt == nil {
       return started, nil // still running: no end time yet
     }
     if c.EndedAt.After(latest) {
@@ -39,8 +42,8 @@ func groupTimes(calls []CallView) (time.Time, *time.Time) {
 }
 
 
-func getGroups(w http.ResponseWriter, r *http.Request) {
-  views := tracker.Snapshot()
+func (h *handlers) getGroups(w http.ResponseWriter, r *http.Request) {
+  views := h.tr.Snapshot()
 
   out := Groups{
     Total:      len(views),
@@ -67,8 +70,8 @@ func getGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func getGroup(w http.ResponseWriter, r *http.Request) {
-  view, ok := tracker.Group(r.PathValue("id"))
+func (h *handlers) getGroup(w http.ResponseWriter, r *http.Request) {
+  view, ok := h.tr.Group(r.PathValue("id"))
   if !ok {
     http.NotFound(w, r)
     return
@@ -77,4 +80,10 @@ func getGroup(w http.ResponseWriter, r *http.Request) {
   w.Header().Set("Content-Type", "application/json")
 
   json.NewEncoder(w).Encode(view)
+}
+
+
+func (h *handlers) debug(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.tr.Snapshot())
 }

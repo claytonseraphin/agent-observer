@@ -1,10 +1,11 @@
-package main
+package tracker
 
 
 import (
-  //"fmt"
   "time"
   "sort"
+
+  "github.com/claytonseraphin/agent-observer/internal/outcome"
 )
 
 
@@ -52,7 +53,7 @@ func buildView(id string, g *GroupRecord) GroupView {
       StartedAt: c.StartedAt,
       Error:     c.Error,
     }
-    if c.Status == StatusProcessing {
+    if c.Status == outcome.StatusProcessing {
       anyProcessing = true
       cv.DurationMs = time.Since(c.StartedAt).Milliseconds()
     } else {
@@ -60,7 +61,7 @@ func buildView(id string, g *GroupRecord) GroupView {
       cv.EndedAt = &ended
       cv.DurationMs = ended.Sub(c.StartedAt).Milliseconds()
     }
-    if c.Status == StatusFailed {
+    if c.Status == outcome.StatusFailed {
       anyFailed = true
     }
     view.Calls = append(view.Calls, cv)
@@ -69,11 +70,11 @@ func buildView(id string, g *GroupRecord) GroupView {
   view.AgentCount = len(agents)
   switch {
   case anyProcessing:
-    view.Status = StatusProcessing
+    view.Status = outcome.StatusProcessing
   case anyFailed:
-    view.Status = StatusFailed
+    view.Status = outcome.StatusFailed
   default:
-    view.Status = StatusSuccess
+    view.Status = outcome.StatusSuccess
   }
   return view
 }

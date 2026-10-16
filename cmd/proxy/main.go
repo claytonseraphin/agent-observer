@@ -1,139 +1,31 @@
 package main
 
-import(
-  "bytes"
-  "io"
-  "net/http"
-  "net/http/httputil"
-  "net/url"
-  //"slices"
-  "strings"
-  "log"
-  "strconv"
-  "time"
-  "encoding/json"
-  "net"
+import (
+	"log"
+	"net/http"
+	"net/url"
+	"time"
+
+	"github.com/claytonseraphin/agent-observer/internal/api"
+	"github.com/claytonseraphin/agent-observer/internal/grouping"
+	"github.com/claytonseraphin/agent-observer/internal/proxy"
+	"github.com/claytonseraphin/agent-observer/internal/tracker"
 )
 
-const publicBase = "http://localhost:8080"
-
-var routes = map[string]*url.URL{
-  "news":           mustParse("http://localhost:8001"),
-  "financial":      mustParse("http://localhost:8002"),
-  "education":      mustParse("http://localhost:8003"),
-}
-
-func clientAddress(r *http.Request) string {
-  // Assuming the client application is behind a proxy, load balancer or CDN
-  if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-    first, _, _ := strings.Cut(xff, ",")
-    return strings.TrimSpace(first)
-  }
-  if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-    return realIP
-  }
-  host, _, err := net.SplitHostPort(r.RemoteAddr)
-  if err != nil {
-    return r.RemoteAddr
-  }
-  return host
-}
-func handler(w http.ResponseWriter, r *http.Request) {
-  log.Printf("incoming: %s %s", r.Method, r.URL.Path)
-
-  name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
-  target, ok := routes[name]
-  if !ok {
-    http.NotFound(w, r)
-    return
-  }
-
-  var groupID string
-  callIndex := -1
-  address := clientAddress(r)
-
-  isCall := r.Method == http.MethodPost
-  isDiscovery := r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "agent-card.json")
-
-  if isCall || isDiscovery {
-  	kind := "call"
-  	if isDiscovery {
-  		kind = "discovery"
-  	}
-
-  	origin := "client"
-  	groupID = r.Header.Get("X-Trace-Id")
-  	if groupID == "" {
-  		origin = "inferred"
-  		groupID = assigner.Begin(address)
-  		defer assigner.End(address)
-  	}
-  	callIndex = tracker.StartCall(groupID, origin, name, kind)
-  	log.Printf("group=%s origin=%s agent=%s kind=%s", groupID, origin, name, kind)
-  }
-
-  start := time.Now()
-  proxy := &httputil.ReverseProxy{
-    Rewrite: func(pr *httputil.ProxyRequest) {
-      pr.SetURL(target)
-      pr.Out.URL.Path = "/" + rest
-      //pr.Out.Host = target.Host
-      pr.Out.Header.Del("Accept-Encoding")
-    },
-    ModifyResponse: func(resp *http.Response) error {
-    	log.Printf("%s %s -> %s %d (%s)", r.Method, r.URL.Path, name,
-    		resp.StatusCode, time.Since(start))
-
-    	// Only POSTs have a callIndex. Card GETs keep -1 and are skipped.
-    	if callIndex >= 0 {
-    		tracker.FinishCall(groupID, callIndex, OutcomeFromResponse(resp))
-    	}
-
-    	if strings.HasSuffix(r.URL.Path, "agent-card.json") &&
-    		resp.StatusCode == http.StatusOK &&
-    		strings.Contains(resp.Header.Get("Content-Type"), "json") {
-    		return rewriteCard(resp, target.String()+"/", publicBase+"/"+name+"/")
-    	}
-    	return nil
-    },
-    ErrorHandler: func(w http.ResponseWriter, req *http.Request, err error) {
-    	log.Printf("%s %s -> %s failed: %v", req.Method, req.URL.Path, name, err)
-    	if callIndex >= 0 {
-    		tracker.FinishCall(groupID, callIndex, OutcomeFromError(err))
-    	}
-    	http.Error(w, "upstream error", http.StatusBadGateway)
-    },
-  }
-  proxy.ServeHTTP(w, r)
-}
-
-
-func rewriteCard(resp *http.Response, from, to string) error {
-  body, err := io.ReadAll(resp.Body)
-  if err != nil {
-    return err
-  }
-  resp.Body.Close()
-  body = bytes.ReplaceAll(body, []byte(from), []byte(to))
-  resp.Body = io.NopCloser(bytes.NewReader(body))
-  resp.ContentLength = int64(len(body))
-  resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
-  return nil
-}
-
-func debugHandler(w http.ResponseWriter, r *http.Request) {
-  w.Header().Set("Content-Type", "application/json")
-  json.NewEncoder(w).Encode(tracker.Snapshot())
-}
-
-
 func main() {
-  startCleanup(time.Minute, time.Hour)
+	tr := tracker.NewTracker()
+	asg := grouping.NewGroupAssigner(10 * time.Second)
+	startCleanup(time.Minute, time.Hour, tr, asg)
 
-  mux := http.NewServeMux()
-  mux.HandleFunc("/debug/requests", debugHandler)
-  mux.HandleFunc("/", handler)
-  mux.HandleFunc("GET /api/groups", getGroups)
-  mux.HandleFunc("GET /api/groups/{id}", getGroup)
-  log.Fatal(http.ListenAndServe(":8080", mux))
+	// Temporary: replaced by the per-project agent registry in Phase 4.
+	routes := map[string]*url.URL{
+		"news":      mustParse("http://localhost:8001"),
+		"financial": mustParse("http://localhost:8002"),
+	}
+
+	mux := http.NewServeMux()
+	api.Register(mux, tr)
+	mux.Handle("/", proxy.New(tr, asg, routes, "http://localhost:8080"))
+
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
