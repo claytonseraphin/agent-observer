@@ -3,6 +3,7 @@ package main
 import (
   "net/url"
   "log"
+  "os"
 )
 
 func mustParse(s string) *url.URL {
@@ -11,4 +12,11 @@ func mustParse(s string) *url.URL {
     log.Fatal(err)
   }
   return u
+}
+
+func envOr(key, fallback string) string{
+  if v := os.Getenv(key); v != "" {
+    return v
+  }
+  return fallback
 }

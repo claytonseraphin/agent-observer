@@ -96,7 +96,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "agent-card.json") &&
 				resp.StatusCode == http.StatusOK &&
 				strings.Contains(resp.Header.Get("Content-Type"), "json") {
-				return rewriteCard(resp, target.String()+"/", p.publicBase+"/"+name+"/")
+				return rewriteCard(resp, p.publicBase+"/"+name+"/")
 			}
 			return nil
 		},
