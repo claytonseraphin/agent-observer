@@ -1,0 +1,66 @@
+name: CI
+
+# Runs on every push to any branch (tags are excluded, so a later release
+# workflow can own them). Merging into staging or production is also a push to
+# that branch, so the checks run again there, followed by the extra jobs below.
+on:
+  push:
+    branches: ['**']
+
+# Least privilege: CI only needs to read the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, vet, build, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Same checks as running `make check` and `make test` locally.
+      - name: gofmt, vet, build
+        run: make check
+
+      - name: Tests
+        run: make test
+
+  # Everything below only runs on staging and production, and only after
+  # the checks above have passed.
+  docker:
+    name: Docker image builds
+    needs: check
+    if: github.ref_name == 'staging' || github.ref_name == 'production'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build only (no push) to catch a broken Dockerfile.
+      - name: Build image
+        run: docker build -t agent-observer:ci .
+
+  vulncheck:
+    name: Dependency vulnerabilities
+    needs: check
+    if: github.ref_name == 'staging' || github.ref_name == 'production'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
