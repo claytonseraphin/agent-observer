@@ -1,31 +1,30 @@
 package tracker
 
 import (
-  "time"
-  "sync"
+	"sync"
+	"time"
 
-  "github.com/claytonseraphin/agent-observer/internal/outcome"
+	"github.com/claytonseraphin/agent-observer/internal/outcome"
 )
 
 type CallRecord struct {
-  Agent        string
-  Kind         string
-  StartedAt    time.Time
-  EndedAt      time.Time
-  Status       string   // processing, success, failed
-  Error        string
+	Agent     string
+	Kind      string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Status    string // processing, success, failed
+	Error     string
 }
 
 type GroupRecord struct {
-  Origin       string   // Client or inferred
-  Calls        []*CallRecord
+	Origin string // Client or inferred
+	Calls  []*CallRecord
 }
 
 type Tracker struct {
-  mu          sync.Mutex
-  groups     map[string]*GroupRecord
+	mu     sync.Mutex
+	groups map[string]*GroupRecord
 }
-
 
 func (t *Tracker) StartCall(groupID, origin, agent, kind string) int {
 	t.mu.Lock()
@@ -39,7 +38,7 @@ func (t *Tracker) StartCall(groupID, origin, agent, kind string) int {
 
 	call := &CallRecord{
 		Agent:     agent,
-    Kind:      kind,
+		Kind:      kind,
 		StartedAt: time.Now(),
 		Status:    outcome.StatusProcessing,
 	}

@@ -18,7 +18,7 @@ func main() {
 	startCleanup(time.Minute, time.Hour, tr, asg)
 
 	// Temporary: replaced by the per-project agent registry in Phase 4.
-  port := envOr("PORT", "8080")
+	port := envOr("PORT", "8080")
 	routes := map[string]*url.URL{
 		"news":      mustParse(envOr("NEWS_URL", "http://localhost:8001")),
 		"financial": mustParse(envOr("FINANCIAL_URL", "http://localhost:8002")),
