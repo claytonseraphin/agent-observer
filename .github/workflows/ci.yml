@@ -21,7 +21,7 @@ jobs:
     name: Format, vet, build, test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -42,7 +42,7 @@ jobs:
     if: github.ref_name == 'staging' || github.ref_name == 'production'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build only (no push) to catch a broken Dockerfile.
       - name: Build image
@@ -54,7 +54,7 @@ jobs:
     if: github.ref_name == 'staging' || github.ref_name == 'production'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
