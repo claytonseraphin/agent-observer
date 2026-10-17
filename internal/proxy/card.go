@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
-	"encoding/json"
 )
 
 func rewriteCard(resp *http.Response, publicURL string) error {
