@@ -26,7 +26,7 @@ func main() {
 		log.Fatal(err)
 	}
 	log.Println("migrations applied")
-	
+
 	tr := tracker.NewTracker()
 	asg := grouping.NewGroupAssigner(10 * time.Second)
 	startCleanup(time.Minute, time.Hour, tr, asg)
