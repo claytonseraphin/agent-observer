@@ -1,18 +1,32 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/claytonseraphin/agent-observer/internal/api"
+	"github.com/claytonseraphin/agent-observer/internal/db"
 	"github.com/claytonseraphin/agent-observer/internal/grouping"
 	"github.com/claytonseraphin/agent-observer/internal/proxy"
 	"github.com/claytonseraphin/agent-observer/internal/tracker"
 )
 
 func main() {
+	ctx := context.Background()
+	pool, err := db.Connect(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pool.Close()
+	if err := db.Migrate(ctx, pool); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("migrations applied")
+	
 	tr := tracker.NewTracker()
 	asg := grouping.NewGroupAssigner(10 * time.Second)
 	startCleanup(time.Minute, time.Hour, tr, asg)

@@ -1,3 +1,7 @@
+-include .env
+POSTGRES_USER ?= observer
+POSTGRES_DB   ?= observer
+
 COMPOSE = docker compose -f compose.yaml -f compose.dev.yaml
 
 .PHONY: help dev down logs ps psql reset check test run
@@ -40,4 +44,4 @@ test:
 	go test -race ./...
 
 run:
-	go run ./cmd/proxy
+	DATABASE_URL='postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/$(POSTGRES_DB)?sslmode=disable' go run ./cmd/proxy
