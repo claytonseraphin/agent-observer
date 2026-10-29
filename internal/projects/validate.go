@@ -53,34 +53,35 @@ var ErrInvalidUpstreamURL = errors.New("invalid upstream URL")
 //
 // The error messages never include the input: a URL can carry a password,
 // and these messages end up in API responses and logs.
-func ValidateUpstreamURL(raw string) (string, error) {
+func ValidateUpstreamURL(raw string) error {
 	if raw == "" || len(raw) > maxUpstreamURLLength {
-		return "", fmt.Errorf("%w: must be 1 to %d characters", ErrInvalidUpstreamURL, maxUpstreamURLLength)
+		return fmt.Errorf("%w: must be 1 to %d characters", ErrInvalidUpstreamURL, maxUpstreamURLLength)
 	}
 	if strings.TrimSpace(raw) != raw {
-		return "", fmt.Errorf("%w: must not start or end with whitespace", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: must not start or end with whitespace", ErrInvalidUpstreamURL)
 	}
 	// A real path never contains a raw ? or #, so this also catches an
 	// empty query ("http://host?") and an empty fragment ("http://host#").
 	if strings.ContainsAny(raw, "?#") {
-		return "", fmt.Errorf("%w: must not contain a query or fragment", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: must not contain a query or fragment", ErrInvalidUpstreamURL)
 	}
 
 	u, err := url.Parse(raw)
 	if err != nil {
 		// err is not wrapped on purpose: *url.Error repeats the whole URL.
-		return "", fmt.Errorf("%w: cannot be parsed", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: cannot be parsed", ErrInvalidUpstreamURL)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", fmt.Errorf("%w: scheme must be http or https", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: scheme must be http or https", ErrInvalidUpstreamURL)
 	}
 	if u.Hostname() == "" {
-		return "", fmt.Errorf("%w: host is missing", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: host is missing", ErrInvalidUpstreamURL)
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("%w: must not contain credentials", ErrInvalidUpstreamURL)
+		return fmt.Errorf("%w: must not contain credentials", ErrInvalidUpstreamURL)
 	}
 
-	u.Path = strings.TrimRight(u.Path, "/")
-	return u.String(), nil
+	// u.Path = strings.TrimRight(u.Path, "/")
+	// return u.String(), nil
+	return nil
 }

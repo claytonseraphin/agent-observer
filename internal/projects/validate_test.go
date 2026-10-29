@@ -149,7 +149,7 @@ func TestValidateUpstreamURL(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ValidateUpstreamURL(tc.input)
+			err := ValidateUpstreamURL(tc.input)
 			if !errors.Is(err, ErrInvalidUpstreamURL) {
 				t.Errorf("ValidateUpstreamURL(%q) error = %v, want %v", tc.input, err, ErrInvalidUpstreamURL)
 			}
@@ -167,7 +167,7 @@ func TestValidateUpstreamURLRejectedSchemes(t *testing.T) {
 		"javascript:alert(1)",
 	} {
 		t.Run(input, func(t *testing.T) {
-			_, err := ValidateUpstreamURL(input)
+			err := ValidateUpstreamURL(input)
 			if !errors.Is(err, ErrInvalidUpstreamURL) {
 				t.Errorf("ValidateUpstreamURL(%q) error = %v, want %v", input, err, ErrInvalidUpstreamURL)
 			}
@@ -177,38 +177,40 @@ func TestValidateUpstreamURLRejectedSchemes(t *testing.T) {
 
 func TestValidateUpstreamURLWithAcceptedInput(t *testing.T) {
 	exactly2048 := "http://" + strings.Repeat("a", 2048-len("http://"))
+	agentCoreURL := "https://bedrock-agentcore.us-west-2.amazonaws.com/runtimes/arn%3Aaws%3Abedrock-agentcore%3Aus-west-2%3A123456789012%3Aruntime%2Fmy_agent-AbC123/invocations/"
 
 	tests := []struct {
 		name  string
 		input string
-		want  string
+		//want  string
 	}{
-		{"localhost with port", "http://localhost:8001", "http://localhost:8001"},
-		{"https host", "https://agent.example.com", "https://agent.example.com"},
-		{"docker host", "http://host.docker.internal:8001", "http://host.docker.internal:8001"},
-		{"trailing slash trimmed", "http://news:8001/", "http://news:8001"},
-		{"path kept", "http://10.0.0.5:8080/a2a", "http://10.0.0.5:8080/a2a"},
-		{"trailing slash after path trimmed", "http://host/a2a/", "http://host/a2a"},
-		{"ipv6", "http://[::1]:8001", "http://[::1]:8001"},
-		{"scheme lowercased", "HTTP://localhost:8001", "http://localhost:8001"},
-		{"exactly 2048 characters", exactly2048, exactly2048},
+		{"localhost with port", "http://localhost:8001"},
+		{"https host", "https://agent.example.com"},
+		{"docker host", "http://host.docker.internal:8001"},
+		{"encoded ARN kept", agentCoreURL},
+		{"trailing slash kept", "http://news:8001/"},
+		{"path kept", "http://10.0.0.5:8080/a2a"},
+		{"trailing slash after path", "http://host/a2a/"},
+		{"ipv6", "http://[::1]:8001"},
+		{"scheme left as typed", "HTTP://localhost:8001"},
+		{"exactly 2048 characters", exactly2048},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ValidateUpstreamURL(tc.input)
+			err := ValidateUpstreamURL(tc.input)
 			if err != nil {
 				t.Errorf("ValidateUpstreamURL(%q) returned error %v", tc.input, err)
 			}
-			if got != tc.want {
-				t.Errorf("ValidateUpstreamURL(%q) = %q, want %q", tc.input, got, tc.want)
-			}
+			// if got != tc.want {
+			// 	t.Errorf("ValidateUpstreamURL(%q) = %q, want %q", tc.input, got, tc.want)
+			// }
 		})
 	}
 }
 
 func TestValidateUpstreamURLErrorDoesNotLeakInput(t *testing.T) {
-	_, err := ValidateUpstreamURL("http://user:secret-password@host")
+	err := ValidateUpstreamURL("http://user:secret-password@host")
 	if err == nil || strings.Contains(err.Error(), "secret-password") {
 		t.Errorf("error must exist and must not contain the password, got %v", err)
 	}
