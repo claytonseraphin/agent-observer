@@ -182,7 +182,6 @@ func TestValidateUpstreamURLWithAcceptedInput(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		//want  string
 	}{
 		{"localhost with port", "http://localhost:8001"},
 		{"https host", "https://agent.example.com"},
@@ -202,9 +201,6 @@ func TestValidateUpstreamURLWithAcceptedInput(t *testing.T) {
 			if err != nil {
 				t.Errorf("ValidateUpstreamURL(%q) returned error %v", tc.input, err)
 			}
-			// if got != tc.want {
-			// 	t.Errorf("ValidateUpstreamURL(%q) = %q, want %q", tc.input, got, tc.want)
-			// }
 		})
 	}
 }
