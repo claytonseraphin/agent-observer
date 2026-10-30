@@ -90,3 +90,21 @@ func TestKeyHint(t *testing.T) {
 		})
 	}
 }
+
+// New Key tests
+func TestNewKey(t *testing.T) {
+	pattern := regexp.MustCompile(`^obs_[A-Za-z0-9_-]{43}$`)
+	new_key := NewKey()
+	if !pattern.MatchString(new_key) {
+		t.Errorf("NewKey() = %q, want obs_ followed by 43 URL-safe base64 characters", NewKey())
+	}
+}
+
+func TestNewKeysDifferentOutputs(t *testing.T) {
+	outputOne := NewKey()
+	outputTwo := NewKey()
+
+	if outputOne == outputTwo {
+		t.Errorf("NewKey() should return a different output on every call")
+	}
+}
