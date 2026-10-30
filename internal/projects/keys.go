@@ -1,8 +1,10 @@
 package projects
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"math/big"
 )
 
 func HashKey(input string) string {
@@ -19,4 +21,21 @@ func KeyHint(input string) string {
 		return input
 	}
 	return input[len(input)-4:]
+}
+
+func NewKey() string {
+	charset := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+	n := 43
+	b := make([]byte, n)
+	charsetSize := big.NewInt(int64(len(charset)))
+
+	for i := range b {
+		num, err := rand.Int(rand.Reader, charsetSize)
+		if err != nil {
+			panic("crypto/rand failed: " + err.Error())
+		}
+		b[i] = charset[num.Int64()]
+	}
+	characters := string(b)
+	return "obs_" + characters
 }
