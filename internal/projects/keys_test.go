@@ -2,6 +2,7 @@ package projects
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -64,4 +65,28 @@ func TestHashKeyWithDifferentInputs(t *testing.T) {
 			t.Errorf("different outputs should produce different hashes: %v, %v", outputOne, outputTwo)
 		}
 	})
+}
+
+// Key hint tests
+func TestKeyHint(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"short key", "obs_abcdefgh", "efgh"},
+		{"full-length key", "obs_" + strings.Repeat("a", 39) + "x7Qa", "x7Qa"},
+		{"exactly 4 characters", "abcd", "abcd"},
+		{"fewer than 4", "ab", "ab"},
+		{"empty", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := KeyHint(tc.input)
+			if got != tc.want {
+				t.Errorf("HasKey(%q) = %q, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
 }
