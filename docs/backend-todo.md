@@ -2,7 +2,7 @@
 
 Scope: backend only. The portal UI waits until the backend below is done.
 
-Last updated: 2026-10-29 (all three validators done; key generation is next)
+Last updated: 2026-10-29 (validators and key / ID generation done; the store is next)
 
 Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design, with the unit-test case tables).
 
@@ -18,6 +18,7 @@ Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design
 - [x] GitHub Actions workflow `ci.yml` is in place and running (see Phase 2b)
 - [x] Database layer: `pgx` pool, embedded `goose` migrations, first migration (`projects`, `project_agents`), fail-fast startup (see Phase 2)
 - [x] The three validators with table-driven unit tests: `ValidateAgentName`, `ValidateProjectName`, `ValidateUpstreamURL` (see Phase 3)
+- [x] Key and ID generation with tests: `HashKey`, `KeyHint`, `NewKey`, `NewProjectID`, built on a private `randomString` helper (see Phase 3)
 
 ## Decisions already made
 
@@ -38,6 +39,7 @@ Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design
 | Agent names | `^[a-z0-9][a-z0-9_-]{0,31}$`, case-sensitive (uppercase rejected, not lowercased), reserved words `api` and `debug`. Underscores allowed inside; a leading `_` or `.` stays free for the proxy's own routes. |
 | Project names | trimmed, 1 to 64 characters (counted as characters, not bytes), no control characters; one character is allowed |
 | Upstream URLs | Validated, then **stored exactly as typed** (no normalisation). A realistic AWS AgentCore URL has a percent-encoded ARN (`%2F`) and a trailing slash; rebuilding the URL decoded the ARN and trimmed the slash, which would break the call. `ValidateUpstreamURL` returns only an error. Error messages never include the URL (it can carry a password). |
+| Random values | One private helper, `randomString(prefix, charset, length)`, built on `crypto/rand` (`rand.Int`, so no modulo bias). It panics if the system randomness fails, instead of returning an empty or weak value. `NewKey` = `obs_` + 43 characters from `A-Za-z0-9-_`; `NewProjectID` = `prj_` + 12 characters from `a-z0-9`. |
 | Platform support | Plain A2A (self-hosted agents) stays the default and the original design. Platform-specific behaviour (AWS AgentCore, LangChain / LangGraph, others) is a per-**agent** setting, not per project, because one project can mix them. Built later, one platform at a time, only after its contract has been read. The base validator stays vendor-neutral; per-platform checks go on top. See Phase 6b. |
 | Upstream credentials | Never stored in the registry. Bearer tokens pass through from the client. SigV4, if added, signs with the proxy's own IAM role. |
 | Go version | 1.26. The remaining standard-library vulnerability fixes exist only in 1.26.x (1.25.14 is the last 1.25 patch). CI takes the latest patch. |
@@ -61,7 +63,7 @@ Goal: same behaviour, new layout. Nothing new gets built in this phase.
   internal/proxy/            proxy.go (Proxy, New, ServeHTTP, clientAddress), card.go (rewriteCard)
   internal/api/              routes.go (Register), api.go (handlers on a struct holding the tracker)
   internal/db/               db.go (Connect), migrate.go (Migrate, embedded), migrations/0001_projects.sql
-  internal/projects/         validate.go, validate_test.go (Phase 3); keys.go and the rest to come
+  internal/projects/         validate.go, keys.go, ids.go, random.go, each with its _test.go (random.go is tested through the public functions); store and the rest to come
   ```
 - [x] Globals replaced by injected values (`proxy.New(tr, asg, routes, publicBase)`, `api.Register(mux, tr)`)
 - [x] Re-run curl tests: success, failed discovery, 404, list, cleanup. Output identical.
@@ -134,7 +136,7 @@ Mostly done. One workflow, `.github/workflows/ci.yml`, triggered on a push to an
   - [ ] Both `setup-go` steps in `ci.yml`: `go-version: '1.26'` and `check-latest: true` (no `go-version-file` alongside; `go-version` wins and `setup-go` warns)
   - [ ] `Dockerfile` builder stage: `golang:1.26-alpine`
 - [ ] Dependabot (`.github/dependabot.yml`): weekly for `gomod`, `github-actions` and `docker`
-- [x] First tests so CI has something to run: the three validators (pure functions, no database). More to come: key generation, `GroupAssigner`, `outcomeFromRPCBody`, `groupIsOld`, `Snapshot`.
+- [x] First tests so CI has something to run: the three validators and the key / ID functions (pure functions, no database). More to come: `GroupAssigner`, `outcomeFromRPCBody`, `groupIsOld`, `Snapshot`.
 - [ ] Branch protection on **`staging` and `production`** (not `main`): pull request required, check "Format, vet, build, test" required; on `production` also "Docker image builds" and branch up to date; vulncheck stays optional; block force pushes and deletions. Private repos need a paid GitHub plan for this to be enforced.
 - [ ] Optional: add a `pull_request` trigger limited to `staging` and `production`, so the Docker build can block a merge (as it stands, it runs after the merge)
 - [ ] Postgres service container in the workflow, for the store tests (once Phase 3 adds them)
@@ -144,11 +146,15 @@ Mostly done. One workflow, `.github/workflows/ci.yml`, triggered on a push to an
 
 Full design: `claude/projects-api-schema.md` (data, request and response shapes, validation, errors, curl checklist, unit-test case tables). The registry is part of the project record, so these are built together.
 
-- [ ] Pure functions first, with table-driven unit tests (tests written before the function; rejected and accepted inputs in separate tables):
+- [x] Pure functions first, with table-driven unit tests (tests written before the function; rejected and accepted inputs in separate tables). All done and green:
   - [x] `ValidateAgentName`
   - [x] `ValidateProjectName`
   - [x] `ValidateUpstreamURL` (returns only an error; the URL is stored as typed, so an AgentCore URL with an encoded ARN survives)
-  - [ ] Project and key generation (`crypto/rand`): `NewProjectID`, `NewKey`, `HashKey` (SHA-256), `KeyHint`. Start with `HashKey` (known vector for `"abc"`), then the shape checks.
+  - [x] `HashKey` (SHA-256, hex; known vectors) and `KeyHint` (last 4 characters)
+  - [x] `NewKey` and `NewProjectID` (shape checks with a regexp, plus "two calls differ"), both calling the private `randomString` helper
+  - [ ] Housekeeping: `gofmt -w internal/projects/`, `make check && make test`, commit
+  - [ ] Optional polish on `ValidateAgentName`: reserved words as a package-level var with `slices.Contains`, more descriptive error messages
+  - [ ] Optional: `NewProjectID` uniqueness test over a thousand IDs using a `map[string]bool`
 - [ ] `ProjectStore` interface (create with agents, list, get, delete, add / list / put / delete agent, find by key hash, look up an agent) with a Postgres implementation; duplicates are handled by translating Postgres error `23505` into a 409, not by check-then-insert
 - [ ] `POST /api/projects` `{name, agents?}` returns `201` with `id`, `name`, `key` (the only time the key appears), `agents`; all-or-nothing in one transaction
 - [ ] `GET /api/projects` (with `agent_count`) and `GET /api/projects/{id}` (never include the key or hash)
@@ -164,12 +170,13 @@ Full design: `claude/projects-api-schema.md` (data, request and response shapes,
   - [ ] Private and metadata address blocking comes before any hosted deployment
 - [ ] JSON error body `{"error":{"code","message"}}` on these routes (brought forward from Phase 6). Error messages never include the submitted URL (it can contain a password).
 - [ ] Seed the `default` project at startup (insert if missing, never overwrite; agents from `NEWS_URL` / `FINANCIAL_URL` so the current news/financial test setup keeps working)
-- [ ] Test with the curl checklist in the schema doc
+- [ ] Test with the curl checklist in the schema doc (includes a field with the wrong JSON type, which must give `400 invalid_json`)
 - [x] Schema doc updated for the validator decisions (underscore rule, project-name rules, URL stored as typed, test tables)
 
 ## Phase 4: handler uses the registry
 
 - [ ] Read `X-Observer-Key`: missing means `default`; unknown means 401
+- [ ] Optional `LooksLikeKey(s) bool` (prefix `obs_`, 47 characters, allowed alphabet): a cheap format check before hashing and the lookup, so malformed keys get a clear 401 without touching the database. This is where "invalid key" tests belong; the generators have no input to reject.
 - [ ] Cache key-to-project lookups in memory (invalidate on writes) so each proxied request does not hit Postgres
 - [ ] First path segment is the agent name, looked up in the project's agents; unknown agent gives a 404 that names it
 - [ ] Build the ReverseProxy for that upstream (share one transport)

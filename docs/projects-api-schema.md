@@ -1,6 +1,6 @@
 # Projects API: schema (Phase 3)
 
-Status: design; Phase 3 is under way. The three validators (agent name, project name, upstream URL) are written and tested; key generation, the store and the handlers are next. Written 2026-10-26, updated 2026-10-29.
+Status: design; Phase 3 is under way. The pure functions are all written and tested (three validators, key and ID generation); the store, the handlers and the `default` seed are next. Written 2026-10-26, updated 2026-10-29.
 Scope: the management API for projects and their agent registry. Proxy behaviour (reading `X-Observer-Key`, routing by registry) is Phase 4.
 
 ## 1. Concepts
@@ -14,11 +14,12 @@ Scope: the management API for projects and their agent registry. Proxy behaviour
 
 | | Format | Visibility | Stored as |
 |---|---|---|---|
-| Project ID | `prj_` + 12 random lowercase letters/digits, e.g. `prj_k3x9q2m7ab4d` (hex or base32, your pick) | Public. Appears in URLs. | plain text, primary key |
-| Project key | `obs_` + 32 random bytes, base64url (43 chars) | Secret. Returned once, in the create response. | SHA-256 hash (hex) plus the last 4 characters as `key_hint` |
+| Project ID | `prj_` + 12 random characters from `a-z0-9`, e.g. `prj_k3x9q2m7ab4d` | Public. Appears in URLs. | plain text, primary key |
+| Project key | `obs_` + 43 random characters from `A-Za-z0-9-_` (47 in total; about 256 bits) | Secret. Returned once, in the create response. | SHA-256 hash (hex) plus the last 4 characters as `key_hint` |
 | `default` project | id is the literal `default` | | `key_hash` is NULL, so no key can ever authenticate as it |
 
-- Both come from `crypto/rand` (Python: `secrets`). Never `math/rand`.
+- Both come from `crypto/rand` (Python: `secrets`), through one private helper `randomString(prefix, charset, length)` that picks each character with `rand.Int` (uniform, no modulo bias). Never `math/rand`.
+- If the system randomness fails, the helper panics rather than returning an empty or weak value: an empty key would hash to a perfectly valid hash and be accepted silently.
 - Why SHA-256 and not bcrypt: the key is 256 random bits, so there is nothing to brute-force, and bcrypt would add tens of milliseconds to every proxied request. Hashing is only there so a database leak doesn't leak working keys.
 - The `obs_` prefix makes leaked keys easy to spot (secret scanners, grep).
 
@@ -155,7 +156,7 @@ Request `{ "url": "http://host.docker.internal:8003" }`. Creates the agent if mi
 | Project name | trimmed, 1 to 64 **characters** (not bytes), no control characters (newline, tab, ...), unique ignoring case (`409 name_taken`) |
 | Agent name | matches `^[a-z0-9][a-z0-9_-]{0,31}$`; not one of the reserved words `api`, `debug`. **Case-sensitive: uppercase is rejected, never lowercased for you.** |
 | Agent URL | at most 2048 chars; no leading or trailing whitespace; parses; scheme is `http` or `https`; the host name is not empty; no user:password (nor a username alone); no query and no fragment (a bare `?` or `#` counts). **Stored exactly as typed: nothing is rewritten.** |
-| Request body | at most 1 MB (`413` beyond); unknown fields rejected; must be valid JSON |
+| Request body | at most 1 MB (`413` beyond); unknown fields rejected; must be valid JSON, and each field must have the right JSON type (a number where a string is expected is `400 invalid_json`) |
 
 Decisions behind those rules:
 
@@ -200,30 +201,37 @@ The validators return distinct error values (`ErrInvalidAgentName`, `ErrReserved
 ## 8. Suggested layout (a suggestion, your call)
 
 ```
-internal/projects/   project.go        types (Project, Agent)
+internal/projects/   project.go        (later) types (Project, Agent)
                      validate.go       ValidateProjectName, ValidateAgentName, ValidateUpstreamURL
                      validate_test.go
-                     keys.go           NewProjectID, NewKey, HashKey, KeyHint
+                     keys.go           NewKey, HashKey, KeyHint
                      keys_test.go
+                     ids.go            NewProjectID
+                     ids_test.go
+                     random.go         randomString (private; tested through NewKey and NewProjectID)
                      store.go          (later) the Store interface
                      postgres.go       (later) the pgx implementation
 internal/api/        projects.go       (later) handlers; the handlers struct gains a store field
 cmd/proxy/main.go    open the pool, run migrations, seed default, pass the store to api.Register
 ```
 
+Convention: each test file mirrors the source file it tests. A project ID is public and not a secret, so it lives in `ids.go`, apart from the key code. The name `projects.go` stays free for the main types and the store interface.
+
 Signatures, as built:
 
 - `ValidateProjectName(raw) (cleaned string, err error)` returns the trimmed name
 - `ValidateAgentName(name) error`
 - `ValidateUpstreamURL(raw) error` (the URL is stored as typed, so there is nothing to return)
+- `NewKey() string`, `NewProjectID() string` (no error return: they panic if the system randomness fails)
+- `HashKey(key string) string`, `KeyHint(key string) string`
 
 Store interface, method names only: create project (with agents), list, get by id, delete, add agent, list agents, put agent, delete agent, and (needed in Phase 4) find project by key hash and look up an agent by project and name.
 
 ## 9. Suggested build order
 
 0. **Database layer** (done): `pgx` connection with `context`, `goose` with embedded migrations, the first migration from section 3, fail-fast at startup.
-1. **Pure functions, tests first**: the three validators are done. Key and ID generation is next (section 11).
-2. Store interface and the Postgres implementation, tested against the compose Postgres (this is the CI "Postgres service container" item).
+1. **Pure functions, tests first** (done): the three validators and the key / ID functions (section 11).
+2. Store interface and the Postgres implementation, tested against the compose Postgres (this is the CI "Postgres service container" item). **Next.**
 3. Handlers one endpoint at a time, in table order, curl after each.
 4. Seed the `default` project and its agents last.
 
@@ -239,6 +247,7 @@ Store interface, method names only: create project (with agents), list, get by i
 - Delete an agent, delete it again (404)
 - Delete a project, then get it (404); delete `default` (409)
 - Body over 1 MB (413), body with an unknown field (400), malformed JSON (400)
+- A field with the wrong JSON type, for example `{"name": 123}` (400 `invalid_json`)
 
 ## 11. Unit test cases (pure functions)
 
@@ -249,8 +258,10 @@ Conventions we settled on:
 - **Tests first.** Write the tests with a stub that compiles, watch them fail, then implement until green.
 - **Rejected and accepted inputs go in separate tables.** A rejected table has `name`, `input` (and `wantErr` when more than one error is possible); an accepted table has `name`, `input`, and `want` when the function returns a value. Struct fields that are always empty are dropped, not filled with placeholders.
 - **Compare errors with `errors.Is`** (it also handles "no error expected", and it matches wrapped errors). Print `tc.wantErr` in the message, never a hard-coded error.
+- **Failure messages print the value that was actually tested** (the variable from the first call), never a second call to the function, and never a hard-coded string.
 - **Groups of inputs with one expected result use a slice and a loop**: the reserved words, the words that only start like a reserved word (`apis`, `api-gateway`, `debugger`), the disallowed URL schemes. The test keeps its own list of reserved words, separate from the one in the implementation, so removing a word from the code is caught.
 - Build long inputs with `strings.Repeat`; declare a shared value above the table when input and expected output are the same string.
+- Private helpers (such as `randomString`) are tested through the public functions that use them; a refactor that keeps those tests green is safe.
 - Run `gofmt -w` on the package before `make check`.
 
 ### ValidateAgentName
@@ -293,14 +304,16 @@ Conventions we settled on:
 
 Also test that an error message never contains the submitted password (`http://user:secret-password@host`).
 
-### Keys and IDs (next; test the shape, not the randomness)
+### Keys and IDs (done; test the shape, not the randomness)
 
 | Function | Checks |
 |---|---|
-| `NewProjectID` | starts with `prj_`, 16 characters, only lowercase letters and digits; two calls return different values |
-| `NewKey` | starts with `obs_`, 47 characters (4 + 43), only letters, digits, `-` and `_`; two calls differ |
-| `HashKey` | same input gives the same output; different inputs differ; output is 64 lowercase hex characters; known vector: `HashKey("abc")` equals `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad` |
-| `KeyHint` | last 4 characters, for example `obs_abcdefgh` → `efgh` |
+| `NewProjectID` | matches `^prj_[a-z0-9]{12}$` (16 characters in total); two calls return different values. Optional stronger check: a thousand IDs stored in a `map[string]bool`, failing on the first repeat. |
+| `NewKey` | matches `^obs_[A-Za-z0-9_-]{43}$` (47 characters in total); two calls differ |
+| `HashKey` | same input gives the same output; different inputs differ; output is 64 lowercase hex characters; known vectors: `""` → `e3b0c442...b855`, `"abc"` → `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`, the "quick brown fox" sentence → `d7a8fbb3...e592` |
+| `KeyHint` | last 4 characters: `obs_abcdefgh` → `efgh`; a full-length key → its last 4; shorter than or equal to 4 characters → returned unchanged (`abcd`, `ab`, empty). It slices by byte, which is safe because keys are ASCII. |
+
+There are no "invalid key" tests for the generators: they take no input, so there is nothing to reject. Rejecting malformed keys belongs to an optional `LooksLikeKey(s) bool` check in Phase 4 (prefix `obs_`, 47 characters, allowed alphabet), run before hashing and the database lookup.
 
 ## 12. Differences from backend-todo.md Phase 3
 
@@ -311,7 +324,8 @@ Also test that an error message never contains the submitted password (`http://u
 - JSON error body is pulled forward from Phase 6 for these routes.
 - Project names reject control characters and are counted in characters; agent names are case-sensitive (uppercase rejected) and may contain underscores inside.
 - Upstream URLs are validated but stored as typed (no normalisation), and `ValidateUpstreamURL` returns only an error.
+- Key and ID generation share one private helper, and panic instead of returning an error when the system randomness fails.
 
 ## 13. Not in this phase
 
-Auth on the management API (Phase 6), key rotation (later: `POST /api/projects/{id}/rotate-key`), renaming (`PATCH`), port-range check on upstream URLs, private-address blocking, per-platform (`kind`) URL checks and connectors (Phase 6b), per-project group counts (Phase 5), and the UI.
+Auth on the management API (Phase 6), key rotation (later: `POST /api/projects/{id}/rotate-key`), renaming (`PATCH`), port-range check on upstream URLs, private-address blocking, per-platform (`kind`) URL checks and connectors (Phase 6b), the optional `LooksLikeKey` format check (Phase 4), per-project group counts (Phase 5), and the UI.
