@@ -2,7 +2,9 @@ package projects
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +143,40 @@ func TestAddingAgentsInCreateProject(t *testing.T) {
 
 	if count != 2 {
 		t.Errorf("incorrect number of agents: %d", count)
+	}
+}
+
+// Test Project name already taken
+func TestProjectNameAlreadyTaken(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	projectOne := newTestProject(t, store)
+
+	_, err := store.CreateProject(ctx, projectOne)
+	if err != nil {
+		t.Fatalf("error creating project one: %v", err)
+	}
+
+	projectTwoID := NewProjectID()
+	key := NewKey()
+	key_hash := HashKey(key)
+	key_hint := KeyHint(key)
+	projectTwo := Project{
+		ID:      projectTwoID,
+		Name:    strings.ToUpper(projectOne.Name),
+		KeyHash: key_hash,
+		KeyHint: key_hint,
+	}
+
+	t.Cleanup(func() {
+		_, err := store.pool.Exec(ctx, "DELETE FROM projects WHERE id = $1", projectTwo.ID)
+		if err != nil {
+			t.Errorf("cleanup failed for %s: %v", projectTwo.ID, err)
+		}
+	})
+
+	_, err = store.CreateProject(ctx, projectTwo)
+	if !errors.Is(err, ErrNameTaken) {
+		t.Errorf("CreateProject with a duplicate name: got error %v, want %v", err, ErrNameTaken)
 	}
 }
