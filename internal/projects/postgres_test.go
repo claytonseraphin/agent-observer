@@ -215,6 +215,40 @@ func TestDuplicateAgentName(t *testing.T) {
 	}
 
 	if count != 0 {
-		t.Errorf("incorrect number of projects: %d", count)
+		t.Errorf("project %s was not rolled back: found %d rows, want 0", project.Name, count)
+	}
+}
+
+// A project without a key (the default-project style): empty hash and hint are stored as NULL
+func TestCreateProjectWithoutKey(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	projectOne := newTestProject(t, store)
+	projectOne.KeyHash = ""
+	projectOne.KeyHint = ""
+
+	projectTwo := newTestProject(t, store)
+	projectTwo.KeyHash = ""
+	projectTwo.KeyHint = ""
+
+	for _, project := range []Project{projectOne, projectTwo} {
+		_, err := store.CreateProject(ctx, project)
+		if err != nil {
+			t.Fatalf("error creating project %s without a key: %v", project.ID, err)
+		}
+
+		var bothNull bool
+		err = store.pool.QueryRow(
+			ctx,
+			`SELECT key_hash IS NULL AND key_hint IS NULL FROM projects WHERE id = $1`,
+			project.ID,
+		).Scan(&bothNull)
+		if err != nil {
+			t.Fatalf("failed to query project %s: %v", project.ID, err)
+		}
+		if !bothNull {
+			t.Errorf("project %s: empty key_hash and key_hint should be stored as NULL", project.ID)
+		}
 	}
 }
