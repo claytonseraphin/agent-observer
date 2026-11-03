@@ -180,3 +180,41 @@ func TestProjectNameAlreadyTaken(t *testing.T) {
 		t.Errorf("CreateProject with a duplicate name: got error %v, want %v", err, ErrNameTaken)
 	}
 }
+
+// Test Duplicate agent name
+func TestDuplicateAgentName(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	project := newTestProject(t, store)
+
+	agentOne := Agent{
+		Name: "news",
+		URL:  "http://localhost:8001",
+	}
+
+	agentTwo := Agent{
+		Name: "news",
+		URL:  "http://localhost:8002",
+	}
+
+	project.Agents = append(project.Agents, agentOne, agentTwo)
+
+	_, err := store.CreateProject(ctx, project)
+	if !errors.Is(err, ErrAgentExists) {
+		t.Errorf("CreateProject with duplicate agent name: got error %v, want %v", err, ErrAgentExists)
+	}
+
+	var count int
+	err = store.pool.QueryRow(
+		ctx, `SELECT count(*) FROM projects WHERE id = $1`,
+		project.ID,
+	).Scan(&count)
+
+	if err != nil {
+		t.Fatalf("failed to query project: %v", err)
+	}
+
+	if count != 0 {
+		t.Errorf("incorrect number of projects: %d", count)
+	}
+}
