@@ -4,7 +4,7 @@ POSTGRES_DB   ?= observer
 
 COMPOSE = docker compose -f compose.yaml -f compose.dev.yaml
 
-.PHONY: help dev down logs ps psql reset check test run
+.PHONY: help dev down logs ps psql reset check test run test-db
 
 help:
 	@echo "make dev    build and start the dev stack (proxy + postgres)"
@@ -16,6 +16,7 @@ help:
 	@echo "make check  gofmt + vet + build (same checks CI will run)"
 	@echo "make test   run go tests"
 	@echo "make run    run the proxy natively (no Docker)"
+	@echo "make test-db run the store tests against the compose Postgres"
 
 dev:
 	$(COMPOSE) up --build
@@ -42,6 +43,9 @@ check:
 
 test:
 	go test -race ./...
+
+test-db:
+	DATABASE_URL='postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/$(POSTGRES_DB)?sslmode=disable' go test -v ./internal/projects/...
 
 run:
 	DATABASE_URL='postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5432/$(POSTGRES_DB)?sslmode=disable' go run ./cmd/proxy
