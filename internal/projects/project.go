@@ -1,7 +1,6 @@
 package projects
 
 import (
-	"net/url"
 	"time"
 )
 
@@ -16,6 +15,6 @@ type Project struct {
 
 type Agent struct {
 	Name      string
-	URL       url.URL
+	URL       string
 	CreatedAt time.Time
 }

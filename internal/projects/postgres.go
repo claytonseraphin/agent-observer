@@ -43,6 +43,28 @@ func (s *PostgresStore) CreateProject(ctx context.Context, project Project) (Pro
 		return Project{}, fmt.Errorf("inserting project: %w", err)
 	}
 
+	// add agents in create project
+	agentQuery := `
+			INSERT INTO project_agents (project_id, name, upstream_url)
+			VALUES($1, $2, $3)
+			RETURNING created_at
+	`
+
+	for i := range project.Agents {
+		err = tx.QueryRow(
+			ctx,
+			agentQuery,
+			project.ID,
+			project.Agents[i].Name,
+			project.Agents[i].URL,
+		).Scan(&project.Agents[i].CreatedAt)
+
+		if err != nil {
+			return Project{}, fmt.Errorf("inserting agent %q: %w", project.Agents[i].Name, err)
+		}
+		project.Agents[i].CreatedAt = project.Agents[i].CreatedAt.UTC()
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return Project{}, fmt.Errorf("committing project: %w", err)
 	}
