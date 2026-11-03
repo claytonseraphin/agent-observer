@@ -2,11 +2,11 @@ package projects
 
 import (
 	"context"
-	"errors"
 	"os"
-	"strings"
 	"testing"
 	"time"
+  "errors"
+  "strings"
 
 	"github.com/claytonseraphin/agent-observer/internal/db"
 )
@@ -101,82 +101,120 @@ func TestCreateProject(t *testing.T) {
 }
 
 // Test adding agents in Create Project
-func TestAddingAgentsInCreateProject(t *testing.T) {
-	store := newTestStore(t)
-	project := newTestProject(t, store)
+func TestAddingAgentsInCreateProject(t *testing.T){
+  store := newTestStore(t)
+  project := newTestProject(t, store)
 
-	ctx := context.Background()
+  ctx := context.Background()
 
-	news := Agent{
-		Name: "news",
-		URL:  "http://localhost:8001",
-	}
+  news := Agent{
+    Name:   "news",
+    URL:    "http://localhost:8001",
+  }
 
-	finance := Agent{
-		Name: "finance",
-		URL:  "http://localhost:8002",
-	}
+  finance := Agent{
+    Name:   "finance",
+    URL:    "http://localhost:8002",
+  }
 
-	project.Agents = append(project.Agents, news, finance)
+  project.Agents = append(project.Agents, news, finance)
 
-	created, err := store.CreateProject(ctx, project)
+  created, err := store.CreateProject(ctx, project)
 
-	if err != nil {
-		t.Fatalf("error creating project: %v", err)
-	}
+  if err != nil {
+    t.Fatalf("error creating project: %v", err)
+  }
 
-	if created.CreatedAt.IsZero() {
-		t.Errorf("created_at was not set")
-	}
+  if created.CreatedAt.IsZero() {
+    t.Errorf("created_at was not set")
+  }
 
-	query := `SELECT COUNT(*) FROM project_agents WHERE project_id = $1`
-	var count int
+  query := `SELECT COUNT(*) FROM project_agents WHERE project_id = $1`
+  var count int
 
-	err = store.pool.QueryRow(
-		ctx,
-		query,
-		project.ID,
-	).Scan(&count)
-	if err != nil {
-		t.Fatalf("failed to query project: %v", err)
-	}
+  err = store.pool.QueryRow(
+    ctx,
+    query,
+    project.ID,
+  ).Scan(&count)
+  if err != nil {
+    t.Fatalf("failed to query project: %v", err)
+  }
 
-	if count != 2 {
-		t.Errorf("incorrect number of agents: %d", count)
-	}
+  if count != 2 {
+    t.Errorf("incorrect number of agents: %d", count)
+  }
 }
 
 // Test Project name already taken
 func TestProjectNameAlreadyTaken(t *testing.T) {
-	ctx := context.Background()
-	store := newTestStore(t)
-	projectOne := newTestProject(t, store)
+  ctx := context.Background()
+  store := newTestStore(t)
+  projectOne := newTestProject(t, store)
 
-	_, err := store.CreateProject(ctx, projectOne)
-	if err != nil {
-		t.Fatalf("error creating project one: %v", err)
-	}
+  _, err := store.CreateProject(ctx, projectOne)
+  if err != nil {
+    t.Fatalf("error creating project one: %v", err)
+  }
 
-	projectTwoID := NewProjectID()
-	key := NewKey()
-	key_hash := HashKey(key)
-	key_hint := KeyHint(key)
-	projectTwo := Project{
-		ID:      projectTwoID,
-		Name:    strings.ToUpper(projectOne.Name),
-		KeyHash: key_hash,
-		KeyHint: key_hint,
-	}
+  projectTwoID := NewProjectID()
+  key := NewKey()
+  key_hash := HashKey(key)
+  key_hint := KeyHint(key)
+  projectTwo := Project{
+    ID:       projectTwoID,
+    Name:     strings.ToUpper(projectOne.Name),
+    KeyHash:  key_hash,
+    KeyHint:  key_hint,
+  }
 
-	t.Cleanup(func() {
-		_, err := store.pool.Exec(ctx, "DELETE FROM projects WHERE id = $1", projectTwo.ID)
-		if err != nil {
-			t.Errorf("cleanup failed for %s: %v", projectTwo.ID, err)
-		}
-	})
+  t.Cleanup(func(){
+    _, err := store.pool.Exec(ctx, "DELETE FROM projects WHERE id = $1", projectTwo.ID)
+    if err != nil {
+      t.Errorf("cleanup failed for %s: %v", projectTwo.ID, err)
+    }
+  })
 
-	_, err = store.CreateProject(ctx, projectTwo)
-	if !errors.Is(err, ErrNameTaken) {
-		t.Errorf("CreateProject with a duplicate name: got error %v, want %v", err, ErrNameTaken)
-	}
+  _, err = store.CreateProject(ctx, projectTwo)
+  if !errors.Is(err, ErrNameTaken) {
+    t.Errorf("CreateProject with a duplicate name: got error %v, want %v", err, ErrNameTaken)
+  }
+}
+
+// Test Duplicate agent name
+func TestDuplicateAgentName(t *testing.T) {
+  ctx := context.Background()
+  store := newTestStore(t)
+  project := newTestProject(t, store)
+
+  agentOne := Agent{
+    Name:       "news",
+    URL:        "http://localhost:8001",
+  }
+
+  agentTwo := Agent{
+    Name:       "news",
+    URL:        "http://localhost:8002",
+  }
+
+  project.Agents = append(project.Agents, agentOne, agentTwo)
+
+  _, err := store.CreateProject(ctx, project)
+  if !errors.Is(err, ErrAgentExists) {
+    t.Errorf("CreateProject with duplicate agent name: got error %v, want %v", err, ErrAgentExists)
+  }
+
+  var count int
+  err = store.pool.QueryRow(
+    ctx, `SELECT count(*) FROM projects WHERE id = $1`,
+    project.ID,
+  ).Scan(&count)
+
+  if err != nil {
+    t.Fatalf("failed to query project: %v", err)
+  }
+
+  if count != 0 {
+    t.Errorf("incorrect number of projects: %d", count)
+  }
 }

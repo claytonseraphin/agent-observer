@@ -9,7 +9,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const projectNameIndex = "projects_name_lower_idx"
+const (
+	projectNameIndex = "projects_name_lower_idx"
+	agentPrimaryKey  = "project_agents_pkey"
+)
 
 type PostgresStore struct {
 	pool *pgxpool.Pool
@@ -68,6 +71,10 @@ func (s *PostgresStore) CreateProject(ctx context.Context, project Project) (Pro
 		).Scan(&project.Agents[i].CreatedAt)
 
 		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == agentPrimaryKey {
+				return Project{}, ErrAgentExists
+			}
 			return Project{}, fmt.Errorf("inserting agent %q: %w", project.Agents[i].Name, err)
 		}
 		project.Agents[i].CreatedAt = project.Agents[i].CreatedAt.UTC()
