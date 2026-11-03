@@ -97,3 +97,49 @@ func TestCreateProject(t *testing.T) {
 		t.Errorf("project with ID %s was not found", project.ID)
 	}
 }
+
+// Test adding agents in Create Project
+func TestAddingAgentsInCreateProject(t *testing.T) {
+	store := newTestStore(t)
+	project := newTestProject(t, store)
+
+	ctx := context.Background()
+
+	news := Agent{
+		Name: "news",
+		URL:  "http://localhost:8001",
+	}
+
+	finance := Agent{
+		Name: "finance",
+		URL:  "http://localhost:8002",
+	}
+
+	project.Agents = append(project.Agents, news, finance)
+
+	created, err := store.CreateProject(ctx, project)
+
+	if err != nil {
+		t.Fatalf("error creating project: %v", err)
+	}
+
+	if created.CreatedAt.IsZero() {
+		t.Errorf("created_at was not set")
+	}
+
+	query := `SELECT COUNT(*) FROM project_agents WHERE project_id = $1`
+	var count int
+
+	err = store.pool.QueryRow(
+		ctx,
+		query,
+		project.ID,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("failed to query project: %v", err)
+	}
+
+	if count != 2 {
+		t.Errorf("incorrect number of agents: %d", count)
+	}
+}
