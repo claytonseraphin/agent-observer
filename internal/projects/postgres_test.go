@@ -252,3 +252,103 @@ func TestCreateProjectWithoutKey(t *testing.T) {
 		}
 	}
 }
+
+// Test Get Project by their id
+// What CreateProject stored is what GetProject returns
+func TestGetProjectByID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	project := newTestProject(t, store)
+
+	_, err := store.CreateProject(ctx, project)
+	if err != nil {
+		t.Fatalf("error creating project %s: %v", project.ID, err)
+	}
+
+	got, err := store.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("error retrieving project %s: %v", project.ID, err)
+	}
+
+	if got.ID != project.ID {
+		t.Errorf("ID: got %q, want %q", got.ID, project.ID)
+	}
+	if got.Name != project.Name {
+		t.Errorf("Name: got %q, want %q", got.Name, project.Name)
+	}
+	if got.KeyHash != project.KeyHash {
+		t.Errorf("KeyHash: got %q, want %q", got.KeyHash, project.KeyHash)
+	}
+	if got.KeyHint != project.KeyHint {
+		t.Errorf("KeyHint: got %q, want %q", got.KeyHint, project.KeyHint)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Errorf("created_at was not set")
+	}
+	if got.CreatedAt.Location() != time.UTC {
+		t.Errorf("created_at should be in UTC, got %v", got.CreatedAt.Location())
+	}
+	if len(got.Agents) != 0 {
+		t.Errorf("a project created without agents should have none, got %d", len(got.Agents))
+	}
+}
+
+// Agents come back with their data, sorted by name (not in insertion order)
+func TestGetProjectWithAgents(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	project := newTestProject(t, store)
+
+	// inserted in the "wrong" order on purpose: news before finance
+	project.Agents = append(project.Agents,
+		Agent{Name: "news", URL: "http://localhost:8001"},
+		Agent{Name: "finance", URL: "http://localhost:8002"},
+	)
+
+	_, err := store.CreateProject(ctx, project)
+	if err != nil {
+		t.Fatalf("error creating project %s: %v", project.ID, err)
+	}
+
+	got, err := store.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("error retrieving project %s: %v", project.ID, err)
+	}
+
+	want := []Agent{
+		{Name: "finance", URL: "http://localhost:8002"},
+		{Name: "news", URL: "http://localhost:8001"},
+	}
+
+	if len(got.Agents) != len(want) {
+		t.Fatalf("number of agents: got %d, want %d", len(got.Agents), len(want))
+	}
+
+	for i := range want {
+		if got.Agents[i].Name != want[i].Name {
+			t.Errorf("agent %d name: got %q, want %q", i, got.Agents[i].Name, want[i].Name)
+		}
+		if got.Agents[i].URL != want[i].URL {
+			t.Errorf("agent %d url: got %q, want %q", i, got.Agents[i].URL, want[i].URL)
+		}
+		if got.Agents[i].CreatedAt.IsZero() {
+			t.Errorf("agent %q: created_at was not set", got.Agents[i].Name)
+		}
+		if got.Agents[i].CreatedAt.Location() != time.UTC {
+			t.Errorf("agent %q: created_at should be in UTC, got %v", got.Agents[i].Name, got.Agents[i].CreatedAt.Location())
+		}
+	}
+}
+
+// An ID that was never stored gives ErrProjectNotFound
+func TestGetProjectNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	missingID := NewProjectID()
+
+	_, err := store.GetProject(ctx, missingID)
+	if !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetProject(%q): got error %v, want %v", missingID, err, ErrProjectNotFound)
+	}
+}

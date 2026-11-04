@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -85,5 +86,50 @@ func (s *PostgresStore) CreateProject(ctx context.Context, project Project) (Pro
 	}
 	project.CreatedAt = project.CreatedAt.UTC()
 
+	return project, nil
+}
+
+// GetProject method
+func (s *PostgresStore) GetProject(ctx context.Context, projectID string) (Project, error) {
+	var project Project
+	err := s.pool.QueryRow(
+		ctx,
+		`SELECT id, name, COALESCE(key_hash, ''), COALESCE(key_hint, ''), created_at FROM projects WHERE id = $1`,
+		projectID,
+	).Scan(
+		&project.ID,
+		&project.Name,
+		&project.KeyHash,
+		&project.KeyHint,
+		&project.CreatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Project{}, ErrProjectNotFound
+		}
+		return Project{}, fmt.Errorf("failed to get project: %w", err)
+	}
+	project.CreatedAt = project.CreatedAt.UTC()
+
+	agentQuery := `SELECT name, upstream_url, created_at FROM project_agents WHERE project_id = $1 ORDER BY name`
+
+	rows, err := s.pool.Query(ctx, agentQuery, project.ID)
+	if err != nil {
+		return Project{}, fmt.Errorf("getting agents: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var agent Agent
+		if err := rows.Scan(&agent.Name, &agent.URL, &agent.CreatedAt); err != nil {
+			return Project{}, fmt.Errorf("reading agent: %w", err)
+		}
+		agent.CreatedAt = agent.CreatedAt.UTC()
+		project.Agents = append(project.Agents, agent)
+	}
+	if err := rows.Err(); err != nil {
+		return Project{}, fmt.Errorf("reading agents: %w", err)
+	}
 	return project, nil
 }
