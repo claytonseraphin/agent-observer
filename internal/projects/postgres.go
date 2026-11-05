@@ -133,3 +133,49 @@ func (s *PostgresStore) GetProject(ctx context.Context, projectID string) (Proje
 	}
 	return project, nil
 }
+
+// List projects
+func (s *PostgresStore) ListProjects(ctx context.Context, limit int) ([]ProjectSummary, error) {
+	var summaries []ProjectSummary
+	query := `SELECT
+								p.id,
+								p.name,
+								COALESCE(p.key_hint, ''),
+								p.created_at,
+								COUNT(pa.name) AS agent_count
+						FROM projects p
+						LEFT JOIN project_agents pa ON pa.project_id = p.id
+						GROUP BY
+								p.id,
+								p.name,
+								p.key_hint,
+								p.created_at
+						ORDER BY p.created_at ASC, p.id ASC
+						LIMIT $1
+	`
+	rows, err := s.pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("error listing projects: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var summary ProjectSummary
+		err := rows.Scan(
+			&summary.ID,
+			&summary.Name,
+			&summary.KeyHint,
+			&summary.CreatedAt,
+			&summary.AgentCount,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("error reading project: %w", err)
+		}
+		summary.CreatedAt = summary.CreatedAt.UTC()
+		summaries = append(summaries, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error reading projects: %w", err)
+	}
+
+	return summaries, nil
+}
