@@ -179,3 +179,26 @@ func (s *PostgresStore) ListProjects(ctx context.Context, limit int) ([]ProjectS
 
 	return summaries, nil
 }
+
+// Delete Project method
+func (s *PostgresStore) DeleteProject(ctx context.Context, id string) error {
+	if id == "default" {
+		return ErrDefaultProtected
+	}
+
+	query := `DELETE FROM projects WHERE id = $1`
+	result, err := s.pool.Exec(
+		ctx,
+		query,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("deleting project: %w", err)
+	}
+
+	if result.RowsAffected() == 0 {
+		return ErrProjectNotFound
+	}
+
+	return nil
+}
