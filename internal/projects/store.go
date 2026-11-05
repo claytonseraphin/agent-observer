@@ -8,6 +8,7 @@ import (
 type ProjectStore interface {
 	CreateProject(ctx context.Context, project Project) (Project, error)
 	GetProject(ctx context.Context, id string) (Project, error)
+	DeleteProject(ctx context.Context, id string) error
 }
 
 var (

@@ -420,3 +420,95 @@ func TestListProjects(t *testing.T) {
 		t.Errorf("Incorrect key hint listed: got %v, want %v", gotTwo.KeyHint, projectTwo.KeyHint)
 	}
 }
+
+// Delete Project Test
+func TestDeleteProject(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	project := newTestProject(t, store)
+
+	news := Agent{Name: "news", URL: "http://localhost:8001"}
+	finance := Agent{Name: "finance", URL: "http://localhost:8002"}
+
+	project.Agents = append(project.Agents, news, finance)
+
+	_, err := store.CreateProject(ctx, project)
+	if err != nil {
+		t.Fatalf("error creating project, %v", err)
+	}
+
+	query := `SELECT count(*) FROM project_agents WHERE project_id = $1`
+	var agentCount int
+
+	err = store.pool.QueryRow(ctx, query, project.ID).Scan(&agentCount)
+	if err != nil {
+		t.Fatalf("error running query: %v", err)
+	}
+
+	if len(project.Agents) != agentCount {
+		t.Errorf("agents stored before delete: got %d, want %d", agentCount, len(project.Agents))
+	}
+
+	if err = store.DeleteProject(ctx, project.ID); err != nil {
+		t.Fatalf("error deleting project %s: %v", project.ID, err)
+	}
+
+	_, err = store.GetProject(ctx, project.ID)
+	if !errors.Is(err, ErrProjectNotFound) {
+		t.Errorf("GetProject(%s): got error %v, want %v", project.ID, err, ErrProjectNotFound)
+	}
+
+	var agentCountAfterDelete int
+
+	err = store.pool.QueryRow(ctx, query, project.ID).Scan(&agentCountAfterDelete)
+	if err != nil {
+		t.Fatalf("error running query: %v", err)
+	}
+
+	if agentCountAfterDelete != 0 {
+		t.Errorf("agents stored after delete: got %d, want %d", agentCountAfterDelete, 0)
+	}
+}
+
+func TestDeleteProjectNotFound(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	unknownID := NewProjectID()
+
+	err := store.DeleteProject(ctx, unknownID)
+	if !errors.Is(err, ErrProjectNotFound) {
+		t.Fatalf("DeleteProject(%q): got error %v, want %v", unknownID, err, ErrProjectNotFound)
+	}
+}
+
+func TestDefaultProjectProtected(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	query := `INSERT INTO projects (id, name) VALUES ('default', 'Default') ON CONFLICT DO NOTHING`
+	_, err := store.pool.Exec(
+		ctx,
+		query,
+	)
+	if err != nil {
+		t.Fatalf("Insert into projects: %v", err)
+	}
+
+	err = store.DeleteProject(ctx, "default")
+	if !errors.Is(err, ErrDefaultProtected) {
+		t.Fatalf("DeleteProject(%s): got error %v, want %v", "default", err, ErrDefaultProtected)
+	}
+
+	getDefaultProject, err := store.GetProject(ctx, "default")
+	if err != nil {
+		t.Fatalf("error retrieveing project %s: %v", "default", err)
+	}
+
+	if getDefaultProject.KeyHash != "" {
+		t.Errorf("incorrect project key hash: got %s, want %s", getDefaultProject.KeyHash, "")
+	}
+
+	if getDefaultProject.KeyHint != "" {
+		t.Errorf("incorrect project key hint: got %s, want %s", getDefaultProject.KeyHint, "")
+	}
+}
