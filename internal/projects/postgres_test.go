@@ -352,3 +352,71 @@ func TestGetProjectNotFound(t *testing.T) {
 		t.Errorf("GetProject(%q): got error %v, want %v", missingID, err, ErrProjectNotFound)
 	}
 }
+
+// Test ListProjects
+func TestListProjects(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	news := Agent{Name: "news", URL: "http://localhost:8001"}
+	finance := Agent{Name: "finance", URL: "http://localhost:8002"}
+
+	projectOne := newTestProject(t, store)
+
+	projectOne.Agents = append(projectOne.Agents, news, finance)
+
+	_, err := store.CreateProject(ctx, projectOne)
+	if err != nil {
+		t.Fatalf("error creating project %s: %v", projectOne.Name, err)
+	}
+
+	projectTwo := newTestProject(t, store)
+	_, err = store.CreateProject(ctx, projectTwo)
+	if err != nil {
+		t.Fatalf("error creating project %s: %v", projectTwo.Name, err)
+	}
+
+	listProjects, err := store.ListProjects(ctx, 1000)
+	if err != nil {
+		t.Fatalf("error listing projects, %v", err)
+	}
+
+	byID := make(map[string]ProjectSummary)
+	for _, summary := range listProjects {
+		byID[summary.ID] = summary
+	}
+
+	gotOne, ok := byID[projectOne.ID]
+	if !ok {
+		t.Fatalf("project %s is missing from the list", projectOne.ID)
+	}
+
+	if gotOne.AgentCount != 2 {
+		t.Errorf("incorrect number of agents for %s: got %d, want %d", gotOne.Name, gotOne.AgentCount, 2)
+	}
+
+	if gotOne.Name != projectOne.Name {
+		t.Errorf("Incorrect project name listed: got %s, want %s", gotOne.Name, projectOne.Name)
+	}
+
+	if gotOne.KeyHint != projectOne.KeyHint {
+		t.Errorf("Incorrect key hint listed: got %v, want %v", gotOne.KeyHint, projectOne.KeyHint)
+	}
+
+	gotTwo, ok := byID[projectTwo.ID]
+	if !ok {
+		t.Fatalf("project %s is missing from the list", projectTwo.ID)
+	}
+
+	if gotTwo.AgentCount != 0 {
+		t.Errorf("incorrect number of agents for %s: got %d, want %d", gotTwo.Name, gotTwo.AgentCount, 0)
+	}
+
+	if gotTwo.Name != projectTwo.Name {
+		t.Errorf("Incorrect project name listed: got %s, want %s", gotTwo.Name, projectTwo.Name)
+	}
+
+	if gotTwo.KeyHint != projectTwo.KeyHint {
+		t.Errorf("Incorrect key hint listed: got %v, want %v", gotTwo.KeyHint, projectTwo.KeyHint)
+	}
+}

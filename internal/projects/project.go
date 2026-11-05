@@ -18,3 +18,11 @@ type Agent struct {
 	URL       string
 	CreatedAt time.Time
 }
+
+type ProjectSummary struct {
+	ID         string
+	Name       string
+	KeyHint    string
+	AgentCount int
+	CreatedAt  time.Time
+}
