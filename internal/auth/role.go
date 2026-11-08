@@ -26,5 +26,5 @@ func (r Role) Can(p Permission) bool {
 }
 
 func RoleFor(user User, projectID string) Role {
-	return 0
+	return Owner
 }
