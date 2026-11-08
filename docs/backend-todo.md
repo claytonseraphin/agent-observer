@@ -2,9 +2,9 @@
 
 Scope: backend only. The portal UI waits until the backend below is done.
 
-Last updated: 2026-10-29 (validators and key / ID generation done; the store is next)
+Last updated: 2026-11-05 (store: create, get, list and delete done; authentication designed, see `claude/auth-design.md`; agent methods, default seeding and the handlers are next)
 
-Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design, with the unit-test case tables).
+Companion docs: `claude/projects-api-schema.md` (the full Phase 3 endpoint design, with the unit-test case tables), `claude/projects-store-plan.md` (the store: files, test setup, test cases, implementation notes, progress) and `claude/auth-design.md` (self-hosted authentication: modes, roles, invites, build order).
 
 ## Done
 
@@ -19,6 +19,8 @@ Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design
 - [x] Database layer: `pgx` pool, embedded `goose` migrations, first migration (`projects`, `project_agents`), fail-fast startup (see Phase 2)
 - [x] The three validators with table-driven unit tests: `ValidateAgentName`, `ValidateProjectName`, `ValidateUpstreamURL` (see Phase 3)
 - [x] Key and ID generation with tests: `HashKey`, `KeyHint`, `NewKey`, `NewProjectID`, built on a private `randomString` helper (see Phase 3)
+- [x] `ProjectStore` interface and `PostgresStore`: `CreateProject` (one transaction, duplicate errors translated), `GetProject`, `ListProjects`, `DeleteProject`, each tested against a real Postgres (see Phase 3 and the store plan)
+- [x] Authentication design brainstorm (2026-11-05): self-hosted first, admin token, GitHub login, roles and invites (see `claude/auth-design.md` and Phase 6c)
 
 ## Decisions already made
 
@@ -31,18 +33,30 @@ Companion doc: `claude/projects-api-schema.md` (the full Phase 3 endpoint design
 | Keys at rest | Hashed with SHA-256 (the key is 256 random bits, so bcrypt would only slow every proxied request). The plain key is shown once, in the create response. |
 | Postgres driver | `pgx` |
 | Migrations | `goose`, with the `.sql` files embedded in the binary (`internal/db/migrations/`). The same files can be run from disk with the goose CLI. |
-| Database config | One `DATABASE_URL` environment variable. Compose builds it from `POSTGRES_*` with host `postgres`; `make run` builds it with host `localhost`. No config file with passwords. |
+| Database config | One `DATABASE_URL` environment variable. Compose builds it from `POSTGRES_*` with host `postgres`; `make run` and `make test-db` build it with host `localhost`. No config file with passwords. |
 | Compose layout | Base `compose.yaml` plus per-environment overrides (dev now; staging and prod in Phase 8 once the deployment target is chosen) |
+| Deployment model | **Self-hosted first**: a team runs the image on its own network and database. A hosted version (we run it) is Later. Nothing in a self-hosted copy is visible to us. |
+| Database for users | Postgres everywhere: the bundled compose service or bring your own through `DATABASE_URL` (own database or schema, not the application's). Other engines are not supported (Postgres-specific migrations and error codes). SQLite is a possible later "try it" mode behind the `ProjectStore` interface, not the production path. |
+| Management auth | `AUTH_MODE=none` (default, laptop) / `token` (one shared `ADMIN_TOKEN` in `.env`, read when the container starts, not at build) / `github` (GitHub login, sessions, roles, invites). Details and build order in `claude/auth-design.md`. |
+| First owner | The deployer sets `ADMIN_TOKEN`, enters it on the portal, creates the first project and invites the team. The owner may then link a GitHub account to the same user record; the token stays as break-glass. |
+| Identity and roles | Identity is `(provider, subject)`, never email. Authorization is owned by this tool: per-project roles `viewer` / `editor` / `owner` in `project_members`. Invites are one-time links (hashed token, expiry), attached to whichever GitHub identity opens them; copy-the-link always works, email is optional. |
+| Sessions | Server-side in Postgres (hashed token), HttpOnly Secure SameSite=Lax cookie, CSRF protected by an `Origin` check. Not JWTs. |
+| Handler authorization seam | Handlers take the current user from `r.Context()` and ask one function, `Can(user, project, action)`. Another user's project returns 404, not 403. |
+| `default` project (auth) | System-owned, visible to every logged-in user. |
 | No key on a request | Attributed to an auto-created `default` project |
 | Wrong key | 401 with a clear message |
 | Projects API shape | See `claude/projects-api-schema.md`: IDs `prj_...`, keys `obs_...`, JSON error body, optional agents at create |
 | Agent names | `^[a-z0-9][a-z0-9_-]{0,31}$`, case-sensitive (uppercase rejected, not lowercased), reserved words `api` and `debug`. Underscores allowed inside; a leading `_` or `.` stays free for the proxy's own routes. |
 | Project names | trimmed, 1 to 64 characters (counted as characters, not bytes), no control characters; one character is allowed |
-| Upstream URLs | Validated, then **stored exactly as typed** (no normalisation). A realistic AWS AgentCore URL has a percent-encoded ARN (`%2F`) and a trailing slash; rebuilding the URL decoded the ARN and trimmed the slash, which would break the call. `ValidateUpstreamURL` returns only an error. Error messages never include the URL (it can carry a password). |
+| Upstream URLs | Validated, then **stored exactly as typed** (no normalisation) and held as a `string` in `Agent.URL` (not `url.URL`). A realistic AWS AgentCore URL has a percent-encoded ARN (`%2F`) and a trailing slash; rebuilding the URL decoded the ARN and trimmed the slash, which would break the call. `ValidateUpstreamURL` returns only an error. Error messages never include the URL (it can carry a password). |
 | Random values | One private helper, `randomString(prefix, charset, length)`, built on `crypto/rand` (`rand.Int`, so no modulo bias). It panics if the system randomness fails, instead of returning an empty or weak value. `NewKey` = `obs_` + 43 characters from `A-Za-z0-9-_`; `NewProjectID` = `prj_` + 12 characters from `a-z0-9`. |
+| Store layering | Interface `ProjectStore` (with the five sentinel errors) in `store.go`; `PostgresStore` in `postgres.go`; handlers depend only on the interface and are tested with a hand-written fake that returns the same sentinels. The store receives a ready-made `Project` and never sees the plain key. Domain structs carry no `json` tags; each endpoint has its own response struct. |
+| Store tests | Against a real Postgres, run with `make test-db`; skipped when `DATABASE_URL` is unset, so `make test` and CI stay green without a database. One pool per test. Unique names and key hashes per test, cleanup with `t.Cleanup`, rows found by ID because the database is shared. |
+| Transactions | Only where several writes must succeed or fail together (`CreateProject`). Single statements are already atomic; the project-to-agents cascade is `on delete cascade` in the migration, not Go code. |
+| `default` project | Fallback for traffic with no key. Seeded at startup by its own method (insert if missing, never overwrite), not by `CreateProject`. No key (`key_hash` NULL). Deleting it is refused in Go before any database call. |
 | Platform support | Plain A2A (self-hosted agents) stays the default and the original design. Platform-specific behaviour (AWS AgentCore, LangChain / LangGraph, others) is a per-**agent** setting, not per project, because one project can mix them. Built later, one platform at a time, only after its contract has been read. The base validator stays vendor-neutral; per-platform checks go on top. See Phase 6b. |
 | Upstream credentials | Never stored in the registry. Bearer tokens pass through from the client. SigV4, if added, signs with the proxy's own IAM role. |
-| Go version | 1.26. The remaining standard-library vulnerability fixes exist only in 1.26.x (1.25.14 is the last 1.25 patch). CI takes the latest patch. |
+| Go version | 1.26. The remaining standard-library vulnerability fixes exist only in 1.26.x (1.25.14 is the last 1.25 patch). CI takes the latest patch. **Stay on 1.26 for now:** a move to 1.27 failed CI earlier and had to be reverted in `ci.yml` and the Dockerfile. A Go minor upgrade changes `go.mod`, both `setup-go` steps and the Dockerfile together, by hand; Dependabot only edits the Dockerfile, so its Go-image bump PR should not be merged on its own. |
 | CI branches | `staging` and `production` (no `main`). Checks on every push; Docker build and govulncheck only on those two. |
 | Container registry | ECR, pushed from GitHub Actions with OIDC (no AWS keys stored in GitHub) |
 | Compute | Leaning ECS Fargate. Kubernetes (kind locally, a time-boxed EKS session) is a learning track only. |
@@ -63,7 +77,7 @@ Goal: same behaviour, new layout. Nothing new gets built in this phase.
   internal/proxy/            proxy.go (Proxy, New, ServeHTTP, clientAddress), card.go (rewriteCard)
   internal/api/              routes.go (Register), api.go (handlers on a struct holding the tracker)
   internal/db/               db.go (Connect), migrate.go (Migrate, embedded), migrations/0001_projects.sql
-  internal/projects/         validate.go, keys.go, ids.go, random.go, each with its _test.go (random.go is tested through the public functions); store and the rest to come
+  internal/projects/         validate.go, keys.go, ids.go, random.go, project.go (types), store.go (interface + errors), postgres.go (PostgresStore), each with its _test.go (random.go is tested through the public functions)
   ```
 - [x] Globals replaced by injected values (`proxy.New(tr, asg, routes, publicBase)`, `api.Register(mux, tr)`)
 - [x] Re-run curl tests: success, failed discovery, 404, list, cleanup. Output identical.
@@ -84,10 +98,11 @@ Order: the Docker and compose items are done, Phase 2b (CI) is mostly done, and 
   - [x] `compose.yaml` (shared): `proxy` and `postgres`, Postgres healthcheck with `depends_on` `condition: service_healthy`, named volume for Postgres data, env var names
   - [x] `compose.dev.yaml`: proxy built from source, Postgres port published to the host for inspection, upstreams via `host.docker.internal`, verbose logging
   - [x] Run dev with `docker compose -f compose.yaml -f compose.dev.yaml up`, or set `COMPOSE_FILE=compose.yaml:compose.dev.yaml` in the local `.env` so plain `docker compose up` works
-  - [ ] All environment-specific values come from env vars (`DATABASE_URL`, `PORT`, log level), nothing baked into the image, so the same image runs everywhere
+  - [ ] All environment-specific values come from env vars (`DATABASE_URL`, `PORT`, log level, later `AUTH_MODE` and `ADMIN_TOKEN`), nothing baked into the image, so the same image runs everywhere
   - [ ] Commit `.env.example`; real `.env*` files stay git-ignored
+  - [ ] Self-hosting packaging: make the bundled Postgres optional with a compose **profile**, document the bring-your-own-Postgres route (`DATABASE_URL`, own database or schema), publish the proxy port on `127.0.0.1` only by default, and log a warning when `AUTH_MODE=none` is bound to a non-local address
   - [ ] `compose.staging.yaml` and `compose.prod.yaml` are deferred to Phase 8, because they depend on the deployment target
-- [x] `Makefile` with dev targets: `help`, `dev`, `down`, `reset`, `logs`, `ps`, `psql`, `check` (gofmt + vet + build), `test`, `run` (builds the host `DATABASE_URL` from `.env`). Staging and prod targets come with their compose files in Phase 8.
+- [x] `Makefile` with dev targets: `help`, `dev`, `down`, `reset`, `logs`, `ps`, `psql`, `check` (gofmt + vet + build), `test`, `test-db` (sets `DATABASE_URL` for one command and runs the store tests against the compose Postgres), `run` (builds the host `DATABASE_URL` from `.env`). Staging and prod targets come with their compose files in Phase 8.
 - [ ] Gotcha to handle: inside the container, `localhost:8001` is the container, not your Mac. Registered upstreams for host-run agents use `http://host.docker.internal:8001`. Document this in the README.
 
 ### Database layer (done)
@@ -112,14 +127,14 @@ projects(
   key_hash    text unique,               -- NULL only for 'default'
   key_hint    text,                      -- last 4 chars of the key
   created_at  timestamptz not null default now()
-)                                        -- plus a unique index on lower(name)
+)                                        -- plus a unique index on lower(name): projects_name_lower_idx
 
 project_agents(
   project_id    text not null references projects(id) on delete cascade,
   name          text not null,
   upstream_url  text not null,
   created_at    timestamptz not null default now(),
-  primary key (project_id, name)
+  primary key (project_id, name)         -- project_agents_pkey
 )
 ```
 
@@ -129,22 +144,22 @@ Mostly done. One workflow, `.github/workflows/ci.yml`, triggered on a push to an
 
 - [x] `gofmt -w .` committed (the `check` job passes: the vulncheck job, which needs it, ran)
 - [x] `ci.yml`: checkout, `actions/setup-go`, then `make check` (gofmt, vet, build) and `make test` (`go test -race ./...`)
-- [ ] Docker image build job (`staging` and `production` pushes only): written; confirm it is green
-- [ ] `govulncheck` job (`staging` and `production` pushes only): runs, but fails until the Go 1.26 move below
-- [ ] **Move to Go 1.26** (the remaining findings are fixed only in 1.26.x):
-  - [ ] `go mod edit -go=1.26.9`, then `make check && make test`
+- [ ] Docker image build job (`staging` and `production` pushes only): written; confirm it is green. Note: on a Dependabot or feature branch only the `check` job runs, so a Dockerfile change is **not** built before merge. The optional `pull_request` trigger below closes that gap.
+- [ ] `govulncheck` job (`staging` and `production` pushes only): runs, but needs the Go 1.26 setup below to pass
+- [ ] **Go 1.26** (the remaining findings are fixed only in 1.26.x; 1.27 failed CI and was reverted, so stay here):
+  - [ ] Confirm `go.mod` says `go 1.26.x`, then `make check && make test`
   - [ ] Both `setup-go` steps in `ci.yml`: `go-version: '1.26'` and `check-latest: true` (no `go-version-file` alongside; `go-version` wins and `setup-go` warns)
   - [ ] `Dockerfile` builder stage: `golang:1.26-alpine`
-- [ ] Dependabot (`.github/dependabot.yml`): weekly for `gomod`, `github-actions` and `docker`
+- [ ] Dependabot (`.github/dependabot.yml`): weekly for `gomod`, `github-actions` and `docker`. The open Dependabot PR bumping `golang` 1.26 to 1.27 should be closed (comment `@dependabot ignore this minor version`, not "major" and not "dependency", which are too broad). Optionally add an `ignore` entry for the `golang` image with `version-update:semver-minor` and `semver-major`, so Go minor upgrades are done by hand. Also check that Dependabot's target branch is `staging` (there is no `main`), or set `target-branch: staging`.
 - [x] First tests so CI has something to run: the three validators and the key / ID functions (pure functions, no database). More to come: `GroupAssigner`, `outcomeFromRPCBody`, `groupIsOld`, `Snapshot`.
 - [ ] Branch protection on **`staging` and `production`** (not `main`): pull request required, check "Format, vet, build, test" required; on `production` also "Docker image builds" and branch up to date; vulncheck stays optional; block force pushes and deletions. Private repos need a paid GitHub plan for this to be enforced.
 - [ ] Optional: add a `pull_request` trigger limited to `staging` and `production`, so the Docker build can block a merge (as it stands, it runs after the merge)
-- [ ] Postgres service container in the workflow, for the store tests (once Phase 3 adds them)
+- [ ] Postgres service container in the workflow, so the store tests (which skip without `DATABASE_URL`) run in CI
 - [ ] When CD arrives: stop cancelling in-progress runs on `production` (`cancel-in-progress` is on for CI only)
 
 ## Phase 3: projects endpoint and agent registry
 
-Full design: `claude/projects-api-schema.md` (data, request and response shapes, validation, errors, curl checklist, unit-test case tables). The registry is part of the project record, so these are built together.
+Full design: `claude/projects-api-schema.md` (data, request and response shapes, validation, errors, curl checklist, unit-test case tables). The store, in detail: `claude/projects-store-plan.md`. Authentication: `claude/auth-design.md`. The registry is part of the project record, so these are built together.
 
 - [x] Pure functions first, with table-driven unit tests (tests written before the function; rejected and accepted inputs in separate tables). All done and green:
   - [x] `ValidateAgentName`
@@ -152,31 +167,42 @@ Full design: `claude/projects-api-schema.md` (data, request and response shapes,
   - [x] `ValidateUpstreamURL` (returns only an error; the URL is stored as typed, so an AgentCore URL with an encoded ARN survives)
   - [x] `HashKey` (SHA-256, hex; known vectors) and `KeyHint` (last 4 characters)
   - [x] `NewKey` and `NewProjectID` (shape checks with a regexp, plus "two calls differ"), both calling the private `randomString` helper
-  - [ ] Housekeeping: `gofmt -w internal/projects/`, `make check && make test`, commit
   - [ ] Optional polish on `ValidateAgentName`: reserved words as a package-level var with `slices.Contains`, more descriptive error messages
   - [ ] Optional: `NewProjectID` uniqueness test over a thousand IDs using a `map[string]bool`
-- [ ] `ProjectStore` interface (create with agents, list, get, delete, add / list / put / delete agent, find by key hash, look up an agent) with a Postgres implementation; duplicates are handled by translating Postgres error `23505` into a 409, not by check-then-insert
-- [ ] `POST /api/projects` `{name, agents?}` returns `201` with `id`, `name`, `key` (the only time the key appears), `agents`; all-or-nothing in one transaction
-- [ ] `GET /api/projects` (with `agent_count`) and `GET /api/projects/{id}` (never include the key or hash)
+- [ ] `ProjectStore` interface and `PostgresStore` (each method: interface, stub, tests, implementation):
+  - [x] Test setup: `newTestStore`, `newTestProject`, `make test-db`
+  - [x] `CreateProject`: project and agents in one transaction; `23505` translated to `ErrNameTaken` / `ErrAgentExists`; empty hash and hint stored as NULL; 5 tests
+  - [x] `GetProject`: `ErrProjectNotFound`; `COALESCE` for NULLs; agents sorted by name; 3 tests (plus the no-key read)
+  - [x] `ListProjects(ctx, limit)` returning `[]ProjectSummary` (`LEFT JOIN` with `COUNT(pa.name)`); main test done; optional tests for order and limit
+  - [x] `DeleteProject`: `default` refused in Go first, then one `DELETE`, `RowsAffected` 0 gives `ErrProjectNotFound`; cascade verified; 3 tests
+  - [ ] `AddAgent` (`ErrAgentExists`; unknown project gives `ErrProjectNotFound` through the foreign-key violation `23503`), `ListAgents`, `PutAgent` (returns whether it was created), `DeleteAgent` (`ErrAgentNotFound`)
+  - [ ] `EnsureDefaultProject(ctx, agents)`: insert if missing, never overwrite; tests for running it twice and for not overwriting an edited agent URL
+  - [ ] Housekeeping: `gofmt -w internal/projects/`, `make check && make test`, commit
+- [ ] **Auth seam, step A** (before the handlers; details in `claude/auth-design.md`): a `User` type, helpers to put the user in and read it from the request context, `Can(user, project, action)` (always allowed in `none` mode), a middleware wrapper, and `AUTH_MODE=none` as the default. Tests for the context helpers and the middleware. Handlers are built against this, with the current user taken from `r.Context()`, so token and GitHub login later need no handler changes.
+- [ ] `POST /api/projects` `{name, agents?}` returns `201` with `id`, `name`, `key` (the only time the key appears), `agents`; the handler generates the ID and key and hashes the key; the store gets the hash only
+- [ ] `GET /api/projects` (with `agent_count`) and `GET /api/projects/{id}` (never include the key or hash; response structs separate from the domain structs)
 - [ ] `DELETE /api/projects/{id}` (`default` is protected: 409)
 - [ ] Agent registry endpoints
   - [ ] `POST /api/projects/{id}/agents` `{name, url}`
   - [ ] `GET /api/projects/{id}/agents`
   - [ ] `PUT /api/projects/{id}/agents/{name}` `{url}` (create or replace; optional)
   - [ ] `DELETE /api/projects/{id}/agents/{name}`
+- [ ] Handler tests in `internal/api` with a hand-written fake store (same sentinel errors as the real one), no database needed
 - [ ] Validation wiring
   - [ ] Name unique within a project
   - [ ] Body at most 1 MB, unknown fields rejected
-  - [ ] Private and metadata address blocking comes before any hosted deployment
-- [ ] JSON error body `{"error":{"code","message"}}` on these routes (brought forward from Phase 6). Error messages never include the submitted URL (it can contain a password).
-- [ ] Seed the `default` project at startup (insert if missing, never overwrite; agents from `NEWS_URL` / `FINANCIAL_URL` so the current news/financial test setup keeps working)
+  - [ ] Private and metadata address blocking comes before any shared deployment
+- [ ] JSON error body `{"error":{"code","message"}}` on these routes (brought forward from Phase 6). Error messages never include the submitted URL (it can contain a password). Handlers map each sentinel to its code with `errors.Is`.
+- [ ] Seed the `default` project at startup with `EnsureDefaultProject` (agents from `NEWS_URL` / `FINANCIAL_URL` so the current news/financial test setup keeps working)
 - [ ] Test with the curl checklist in the schema doc (includes a field with the wrong JSON type, which must give `400 invalid_json`)
+- [ ] **Brainstorm session after the handlers are implemented** (the authentication brainstorm already happened on 2026-11-05; topic for this one still to be decided)
 - [x] Schema doc updated for the validator decisions (underscore rule, project-name rules, URL stored as typed, test tables)
 
 ## Phase 4: handler uses the registry
 
 - [ ] Read `X-Observer-Key`: missing means `default`; unknown means 401
 - [ ] Optional `LooksLikeKey(s) bool` (prefix `obs_`, 47 characters, allowed alphabet): a cheap format check before hashing and the lookup, so malformed keys get a clear 401 without touching the database. This is where "invalid key" tests belong; the generators have no input to reject.
+- [ ] Store methods needed here: find a project by key hash, look up an agent by project and name
 - [ ] Cache key-to-project lookups in memory (invalidate on writes) so each proxied request does not hit Postgres
 - [ ] First path segment is the agent name, looked up in the project's agents; unknown agent gives a 404 that names it
 - [ ] Build the ReverseProxy for that upstream (share one transport)
@@ -197,7 +223,7 @@ Done after Phase 4, as its own step. The handler must already resolve a project,
 - [ ] `GroupAssigner` key becomes project plus client address
 - [ ] Cleanup keeps working across projects
 - [ ] New routes: `GET /api/projects/{id}/groups` and `GET /api/projects/{id}/groups/{gid}`
-- [ ] Keep `/api/groups` as an "all projects" alias until the UI switches
+- [ ] Keep `/api/groups` as an "all projects" alias until the UI switches. It is open and unscoped today, so it goes behind the auth middleware (Phase 6c) before any exposed deployment.
 - [ ] Project summary counts on `GET /api/projects` (groups, running, failed, last activity)
 - [ ] Decide what happens to a deleted project's in-memory groups (age out through cleanup, or remove at once)
 - [ ] Verify: two projects sending the same `X-Trace-Id` end up in separate groups, and neither can read the other's
@@ -206,12 +232,22 @@ Done after Phase 4, as its own step. The handler must already resolve a project,
 
 - [ ] Flags or env for `-idle-gap`, `-retention`, `-cleanup-every`, port
 - [ ] JSON error body for unknown group (the project routes already have it from Phase 3)
-- [ ] CORS wrapper for a UI on another port
-- [ ] Auth on the management API (`POST /api/projects` is open for now; fine on localhost, not hosted)
+- [ ] CORS wrapper for a UI on another port (not needed if the portal is served by the proxy on the same origin; that question is open in `claude/auth-design.md`)
+- [ ] Auth on the management API: see Phase 6c (`POST /api/projects` is open for now; fine on localhost, not exposed)
 - [ ] Optional `.UTC()` on timestamps in the existing group views (the new project endpoints use UTC from the start)
-- [ ] Tests: `GroupAssigner`, `outcomeFromRPCBody`, `Snapshot`, project store (against the compose Postgres)
+- [ ] Tests: `GroupAssigner`, `outcomeFromRPCBody`, `Snapshot` (the project store tests are done and run with `make test-db`)
 - [ ] Verify the real JSON-RPC method name and task-state spelling in live POST bodies
 - [ ] Optional `MIGRATE_ON_START` toggle, or goose's advisory lock, before running more than one proxy instance (migrations run at startup today, which is fine for one instance)
+
+## Phase 6c: authentication and access (designed 2026-11-05, build after the Phase 3 handlers)
+
+Full design, flows and security checklist: `claude/auth-design.md`. Step A (the seam) is in Phase 3; the rest is built in this order. Handlers do not change between steps because they only use `Can(...)`.
+
+- [ ] **Step B: `token` mode.** `AUTH_MODE=token` and `ADMIN_TOKEN` read from the environment at container start; refuse to start if empty or short; constant-time comparison; rate-limited attempts. Login page on the portal home. Migration `0002`: `users`, `sessions`, nullable `projects.owner_id`; a built-in bootstrap user. Sessions in Postgres (hashed token), HttpOnly Secure SameSite=Lax cookie, `Origin` check for CSRF. Tests for the middleware, the session store and an expired session. Add `AUTH_MODE` and `ADMIN_TOKEN` to `.env.example` and the compose env.
+- [ ] **Step C: GitHub login.** `AUTH_MODE=github`: OAuth app (client ID, secret, callback URL in `.env`), authorization code flow with PKCE and `state`, fetch user and primary verified email, `identities(provider, subject)`. "Connect GitHub" for the bootstrap owner attaches the identity to the existing user record. Optional `GITHUB_ALLOWED_ORG` rule (needs `read:org`; may need org-owner approval); configurable API base for GitHub Enterprise Server. Short sessions or a re-check on refresh, since leaving the org does not end a session.
+- [ ] **Step D: members, roles and invites.** `project_members(project_id, user_id, role)` with `viewer` / `editor` / `owner`; `Can` reads it; `ListProjects` returns only projects the user may see; invites table with one-time links (hashed token, expiry, single use), copy-the-link always works, optional SMTP email. Another user's project returns 404.
+- [ ] Decide the open questions in `claude/auth-design.md` section 9 (same-origin portal, session lifetime, role names, `default` fallback once auth is on, SMTP)
+- [ ] Security checklist from the design doc applied to each step: no tokens, keys or invite links in logs, no open redirect after login, exact callback URLs, hashed tokens with expiries
 
 ## Phase 6b: platform connectors (optional, after the core backend)
 
@@ -221,7 +257,7 @@ Adoption is wide (Google Cloud / Vertex AI, Microsoft Azure AI Foundry and Copil
 
 Plan:
 
-- [ ] Add an optional `kind` on the agent (default `a2a` = plain, today's behaviour). Stored on `project_agents` with a new migration (`0002`), returned and accepted by the agents API. Per agent, not per project.
+- [ ] Add an optional `kind` on the agent (default `a2a` = plain, today's behaviour). Stored on `project_agents` with a new migration, returned and accepted by the agents API. Per agent, not per project.
 - [ ] One small "upstream" step per kind that prepares the outgoing request (host, headers, signing). Plain A2A does nothing, so existing behaviour is untouched.
 - [ ] Optional per-kind URL check on top of the common validator (for `aws_agentcore`: host `bedrock-agentcore.<region>.amazonaws.com` and a path shaped like `/runtimes/<encoded ARN>/invocations/`), giving a clear error when someone pastes the wrong URL. The common validator stays vendor-neutral.
 - [ ] Add a platform only after its A2A contract has been read. **Only AWS AgentCore has been looked at so far.**
@@ -262,17 +298,17 @@ Sources: [A2A protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/l
 
 ## Phase 8: CD and releases (after the backend is stable)
 
-Depends on one open decision: where the hosted portal and proxy run.
+Depends on one open decision: where the hosted portal and proxy run. Self-hosted teams only need the published image and a compose file; this phase is about our own deployment and about publishing.
 
 - [ ] **Decide the deployment target.** Leaning: ECR for images, ECS Fargate for the proxy, RDS for Postgres (it matches existing AWS skills; the image is tiny so registry cost is negligible). The cheap alternative is a VPS running the compose file. The rest of this phase follows from the choice.
 - [ ] `GET /api/health` on the proxy (liveness for the platform and for the Compose healthcheck); consider pinging the database
 - [ ] ECR repository and an IAM role that GitHub Actions assumes through OIDC, limited to the `staging` and `production` branches
 - [ ] `deploy.yml` workflow: build the image, tag it with the commit SHA plus the branch name, push to ECR; release tags `v*` get version tags
-- [ ] Secrets (database URL, deploy settings) in the platform's secret store (for example AWS Secrets Manager or SSM), never in the repo
+- [ ] Secrets (database URL, deploy settings, `ADMIN_TOKEN`, GitHub client secret) in the platform's secret store (for example AWS Secrets Manager or SSM), never in the repo
 - [ ] Database URL for RDS uses a TLS mode (`sslmode=require` or stricter), unlike the local `sslmode=disable`
 - [ ] Deploy job: update the ECS service to the new image, run migrations, wait for `/api/health`
 - [ ] Rollback: keep the previous image tags and document how to redeploy one
-- [ ] Optional: publish proxy binaries (GoReleaser) for people who want to run it without Docker, since the proxy is meant to be open source; optionally also publish a public image to GitHub Container Registry
+- [ ] Publish a public image (GitHub Container Registry) and release binaries (GoReleaser) so teams can self-host without building from source; this is the primary distribution path now
 - [ ] Only if the target is compose-based: `compose.staging.yaml` and `compose.prod.yaml` as overrides on `compose.yaml`
   - [ ] Proxy image is a pinned tag from the registry (no build from source)
   - [ ] Postgres port not published; only the proxy can reach it
@@ -287,7 +323,9 @@ Depends on one open decision: where the hosted portal and proxy run.
 - [ ] Portal UI (project switcher first, then groups, then call detail)
 - [ ] Streaming support (`peekBody` and duration logic assume non-streaming)
 - [ ] Move groups and calls to Postgres for history, if wanted
-- [ ] Hosted deployment hardening: TLS, real auth, private-address blocking (the pipeline itself is Phase 8)
+- [ ] Google Workspace / generic OIDC login (domain restriction through the `hd` claim; covers Okta and Entra), then personal Gmail by invite only
+- [ ] Optional SQLite "try it" mode behind the `ProjectStore` interface (single machine, not the production path)
+- [ ] A hosted version we run ourselves: mandatory login, strict isolation between users, TLS, rate limits, private-address blocking (the pipeline itself is Phase 8)
 - [ ] Key rotation: `POST /api/projects/{id}/rotate-key`
-- [ ] Before taking the project public or commercial: choose a license on purpose (get legal advice), check the project name for trademark conflicts, keep the privacy defaults (no raw prompts stored), and talk to a handful of people building multi-agent systems
+- [ ] Before taking the project public or commercial: choose a license on purpose (get legal advice), check the project name for trademark conflicts, keep the privacy defaults (no raw prompts stored), check the employment agreement for outside-work or invention clauses, and talk to a handful of people building multi-agent systems
 - [ ] Optional Kubernetes learning track: manifests in `deploy/k8s/`, run on `kind` locally; a time-boxed EKS session (bring a cluster up, deploy from ECR, tear it down the same day). Real staging and production stay on ECS.
