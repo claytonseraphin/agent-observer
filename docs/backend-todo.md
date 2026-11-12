@@ -2,9 +2,9 @@
 
 Scope: backend only. The portal UI waits until the backend below is done.
 
-Last updated: 2026-11-05 (store: create, get, list and delete done; authentication designed, see `claude/auth-design.md`; agent methods, default seeding and the handlers are next)
+Last updated: 2026-11-09 (store: create, get, list and delete done; auth seam, step A, done in `internal/auth`; agent methods, default seeding and the project handlers are next)
 
-Companion docs: `claude/projects-api-schema.md` (the full Phase 3 endpoint design, with the unit-test case tables), `claude/projects-store-plan.md` (the store: files, test setup, test cases, implementation notes, progress) and `claude/auth-design.md` (self-hosted authentication: modes, roles, invites, build order).
+Companion docs: `claude/projects-api-schema.md` (the full Phase 3 endpoint design, with the unit-test case tables), `claude/projects-store-plan.md` (the store: files, test setup, test cases, implementation notes, progress) and `claude/auth-design.md` (self-hosted authentication: modes, roles, invites, step A as built, build order).
 
 ## Done
 
@@ -21,6 +21,7 @@ Companion docs: `claude/projects-api-schema.md` (the full Phase 3 endpoint desig
 - [x] Key and ID generation with tests: `HashKey`, `KeyHint`, `NewKey`, `NewProjectID`, built on a private `randomString` helper (see Phase 3)
 - [x] `ProjectStore` interface and `PostgresStore`: `CreateProject` (one transaction, duplicate errors translated), `GetProject`, `ListProjects`, `DeleteProject`, each tested against a real Postgres (see Phase 3 and the store plan)
 - [x] Authentication design brainstorm (2026-11-05): self-hosted first, admin token, GitHub login, roles and invites (see `claude/auth-design.md` and Phase 6c)
+- [x] Auth seam, step A (2026-11-09), package `internal/auth`, tests green: `User` and `LocalUser()`, `ContextWithUser` / `UserFromContext`, `Permission` and `Role` bit flags with `Role.Can`, `RoleFor` (returns `Owner` for now), `NoAuth` middleware
 
 ## Decisions already made
 
@@ -36,12 +37,14 @@ Companion docs: `claude/projects-api-schema.md` (the full Phase 3 endpoint desig
 | Database config | One `DATABASE_URL` environment variable. Compose builds it from `POSTGRES_*` with host `postgres`; `make run` and `make test-db` build it with host `localhost`. No config file with passwords. |
 | Compose layout | Base `compose.yaml` plus per-environment overrides (dev now; staging and prod in Phase 8 once the deployment target is chosen) |
 | Deployment model | **Self-hosted first**: a team runs the image on its own network and database. A hosted version (we run it) is Later. Nothing in a self-hosted copy is visible to us. |
+| Portal | Served by the proxy on the **same origin** (decided 2026-11-06). No CORS work, simple cookie sessions. |
 | Database for users | Postgres everywhere: the bundled compose service or bring your own through `DATABASE_URL` (own database or schema, not the application's). Other engines are not supported (Postgres-specific migrations and error codes). SQLite is a possible later "try it" mode behind the `ProjectStore` interface, not the production path. |
-| Management auth | `AUTH_MODE=none` (default, laptop) / `token` (one shared `ADMIN_TOKEN` in `.env`, read when the container starts, not at build) / `github` (GitHub login, sessions, roles, invites). Details and build order in `claude/auth-design.md`. |
+| Management auth | `AUTH_MODE=none` (default, laptop) / `token` (one shared `ADMIN_TOKEN` in `.env`, read when the container starts, not at build) / `github` (GitHub login, sessions, roles, invites). `none` is unrelated to the admin token: every request is the built-in `LocalUser()` with the `Owner` role. Details and build order in `claude/auth-design.md`. |
 | First owner | The deployer sets `ADMIN_TOKEN`, enters it on the portal, creates the first project and invites the team. The owner may then link a GitHub account to the same user record; the token stays as break-glass. |
-| Identity and roles | Identity is `(provider, subject)`, never email. Authorization is owned by this tool: per-project roles `viewer` / `editor` / `owner` in `project_members`. Invites are one-time links (hashed token, expiry), attached to whichever GitHub identity opens them; copy-the-link always works, email is optional. |
+| Identity and roles | Identity is `(provider, subject)`, never email. Authorization is owned by this tool. `Permission` is a bit flag (`Read`, `Write`, `Delete`, `Manage`); a `Role` is a set of permissions (`Viewer` = Read, `Editor` = Read + Write, `Owner` = all, `0` = no access), stored per project in `project_members` (step D). The role is not a field on `User`. |
+| Invites | One-time links (hashed token, expiry), attached to whichever GitHub identity opens them; copy-the-link always works, email is optional. |
 | Sessions | Server-side in Postgres (hashed token), HttpOnly Secure SameSite=Lax cookie, CSRF protected by an `Origin` check. Not JWTs. |
-| Handler authorization seam | Handlers take the current user from `r.Context()` and ask one function, `Can(user, project, action)`. Another user's project returns 404, not 403. |
+| Handler authorization flow | `UserFromContext(r.Context())` (no user: 401), then `RoleFor(user, projectID)`, then `role.Can(<permission>)`; false returns 404, not 403. Each handler hard-codes its own permission. No `Authorizer` interface for now; `RoleFor` gains a `ctx` and an `error` in step D. |
 | `default` project (auth) | System-owned, visible to every logged-in user. |
 | No key on a request | Attributed to an auto-created `default` project |
 | Wrong key | 401 with a clear message |
@@ -78,6 +81,7 @@ Goal: same behaviour, new layout. Nothing new gets built in this phase.
   internal/api/              routes.go (Register), api.go (handlers on a struct holding the tracker)
   internal/db/               db.go (Connect), migrate.go (Migrate, embedded), migrations/0001_projects.sql
   internal/projects/         validate.go, keys.go, ids.go, random.go, project.go (types), store.go (interface + errors), postgres.go (PostgresStore), each with its _test.go (random.go is tested through the public functions)
+  internal/auth/             user.go, context.go, role.go, middleware.go, each with its _test.go (the store files arrive with Phase 6c step B)
   ```
 - [x] Globals replaced by injected values (`proxy.New(tr, asg, routes, publicBase)`, `api.Register(mux, tr)`)
 - [x] Re-run curl tests: success, failed discovery, 404, list, cleanup. Output identical.
@@ -151,7 +155,7 @@ Mostly done. One workflow, `.github/workflows/ci.yml`, triggered on a push to an
   - [ ] Both `setup-go` steps in `ci.yml`: `go-version: '1.26'` and `check-latest: true` (no `go-version-file` alongside; `go-version` wins and `setup-go` warns)
   - [ ] `Dockerfile` builder stage: `golang:1.26-alpine`
 - [ ] Dependabot (`.github/dependabot.yml`): weekly for `gomod`, `github-actions` and `docker`. The open Dependabot PR bumping `golang` 1.26 to 1.27 should be closed (comment `@dependabot ignore this minor version`, not "major" and not "dependency", which are too broad). Optionally add an `ignore` entry for the `golang` image with `version-update:semver-minor` and `semver-major`, so Go minor upgrades are done by hand. Also check that Dependabot's target branch is `staging` (there is no `main`), or set `target-branch: staging`.
-- [x] First tests so CI has something to run: the three validators and the key / ID functions (pure functions, no database). More to come: `GroupAssigner`, `outcomeFromRPCBody`, `groupIsOld`, `Snapshot`.
+- [x] First tests so CI has something to run: the three validators, the key / ID functions and the `internal/auth` tests (pure functions, no database). More to come: `GroupAssigner`, `outcomeFromRPCBody`, `groupIsOld`, `Snapshot`.
 - [ ] Branch protection on **`staging` and `production`** (not `main`): pull request required, check "Format, vet, build, test" required; on `production` also "Docker image builds" and branch up to date; vulncheck stays optional; block force pushes and deletions. Private repos need a paid GitHub plan for this to be enforced.
 - [ ] Optional: add a `pull_request` trigger limited to `staging` and `production`, so the Docker build can block a merge (as it stands, it runs after the merge)
 - [ ] Postgres service container in the workflow, so the store tests (which skip without `DATABASE_URL`) run in CI
@@ -178,24 +182,28 @@ Full design: `claude/projects-api-schema.md` (data, request and response shapes,
   - [ ] `AddAgent` (`ErrAgentExists`; unknown project gives `ErrProjectNotFound` through the foreign-key violation `23503`), `ListAgents`, `PutAgent` (returns whether it was created), `DeleteAgent` (`ErrAgentNotFound`)
   - [ ] `EnsureDefaultProject(ctx, agents)`: insert if missing, never overwrite; tests for running it twice and for not overwriting an edited agent URL
   - [ ] Housekeeping: `gofmt -w internal/projects/`, `make check && make test`, commit
-- [ ] **Auth seam, step A** (before the handlers; details in `claude/auth-design.md`): a `User` type, helpers to put the user in and read it from the request context, `Can(user, project, action)` (always allowed in `none` mode), a middleware wrapper, and `AUTH_MODE=none` as the default. Tests for the context helpers and the middleware. Handlers are built against this, with the current user taken from `r.Context()`, so token and GitHub login later need no handler changes.
-- [ ] `POST /api/projects` `{name, agents?}` returns `201` with `id`, `name`, `key` (the only time the key appears), `agents`; the handler generates the ID and key and hashes the key; the store gets the hash only
-- [ ] `GET /api/projects` (with `agent_count`) and `GET /api/projects/{id}` (never include the key or hash; response structs separate from the domain structs)
-- [ ] `DELETE /api/projects/{id}` (`default` is protected: 409)
-- [ ] Agent registry endpoints
+- [x] **Auth seam, step A** (`internal/auth`, tests green): `User` and `LocalUser()`, `ContextWithUser` / `UserFromContext`, `Permission` / `Role` bit flags with `Role.Can`, `RoleFor` (returns `Owner`), `NoAuth` middleware. Handlers are built against it: current user from `r.Context()`, role from `RoleFor`, permission checked with `role.Can`, so token and GitHub login later need no handler changes.
+- [ ] Handler groundwork (tests first)
+  - [ ] JSON error helper producing `{"error":{"code","message"}}` plus the status code, with its own small test
+  - [ ] Fake store in `internal/api`: a struct with a map implementing `ProjectStore`, returning the same sentinel errors as the real store, able to fail on demand (for the 409 and 500 cases)
+- [ ] `POST /api/projects` `{name, agents?}` returns `201` with `id`, `name`, `key` (the only time the key appears), `agents`; the handler generates the ID and key and hashes the key; the store gets the hash only. No `RoleFor` check (there is no project yet); any logged-in user may create. Test cases are in the schema doc and in the handler test table (happy path, hash not key reaches the store, invalid name/agent/URL, wrong JSON type, unknown field, body over 1 MB, `ErrNameTaken` 409, `ErrAgentExists` 409, unknown error 500 with a generic message).
+- [ ] `GET /api/projects` (with `agent_count`) and `GET /api/projects/{id}` (permission `Read`; never include the key or hash; response structs separate from the domain structs)
+- [ ] `DELETE /api/projects/{id}` (permission `Delete`; `default` is protected: 409)
+- [ ] Agent registry endpoints (permission `Write` for changes, `Read` for the list)
   - [ ] `POST /api/projects/{id}/agents` `{name, url}`
   - [ ] `GET /api/projects/{id}/agents`
   - [ ] `PUT /api/projects/{id}/agents/{name}` `{url}` (create or replace; optional)
   - [ ] `DELETE /api/projects/{id}/agents/{name}`
-- [ ] Handler tests in `internal/api` with a hand-written fake store (same sentinel errors as the real one), no database needed
+- [ ] Handler tests in `internal/api` with the fake store (no database needed), plus a case where the role check denies and the handler answers 404
 - [ ] Validation wiring
   - [ ] Name unique within a project
   - [ ] Body at most 1 MB, unknown fields rejected
   - [ ] Private and metadata address blocking comes before any shared deployment
 - [ ] JSON error body `{"error":{"code","message"}}` on these routes (brought forward from Phase 6). Error messages never include the submitted URL (it can contain a password). Handlers map each sentinel to its code with `errors.Is`.
+- [ ] Wrap the management routes with `auth.NoAuth` in `main` / `api.Register` (proxy routes stay unwrapped)
 - [ ] Seed the `default` project at startup with `EnsureDefaultProject` (agents from `NEWS_URL` / `FINANCIAL_URL` so the current news/financial test setup keeps working)
 - [ ] Test with the curl checklist in the schema doc (includes a field with the wrong JSON type, which must give `400 invalid_json`)
-- [ ] **Brainstorm session after the handlers are implemented** (the authentication brainstorm already happened on 2026-11-05; topic for this one still to be decided)
+- [ ] **Brainstorm session after the handlers are implemented: the Python and npm SDK design** (the authentication brainstorm already happened on 2026-11-05)
 - [x] Schema doc updated for the validator decisions (underscore rule, project-name rules, URL stored as typed, test tables)
 
 ## Phase 4: handler uses the registry
@@ -232,21 +240,22 @@ Done after Phase 4, as its own step. The handler must already resolve a project,
 
 - [ ] Flags or env for `-idle-gap`, `-retention`, `-cleanup-every`, port
 - [ ] JSON error body for unknown group (the project routes already have it from Phase 3)
-- [ ] CORS wrapper for a UI on another port (not needed if the portal is served by the proxy on the same origin; that question is open in `claude/auth-design.md`)
+- [x] CORS wrapper: not needed, the portal is served by the proxy on the same origin
 - [ ] Auth on the management API: see Phase 6c (`POST /api/projects` is open for now; fine on localhost, not exposed)
 - [ ] Optional `.UTC()` on timestamps in the existing group views (the new project endpoints use UTC from the start)
 - [ ] Tests: `GroupAssigner`, `outcomeFromRPCBody`, `Snapshot` (the project store tests are done and run with `make test-db`)
 - [ ] Verify the real JSON-RPC method name and task-state spelling in live POST bodies
 - [ ] Optional `MIGRATE_ON_START` toggle, or goose's advisory lock, before running more than one proxy instance (migrations run at startup today, which is fine for one instance)
 
-## Phase 6c: authentication and access (designed 2026-11-05, build after the Phase 3 handlers)
+## Phase 6c: authentication and access (designed 2026-11-05, step A built 2026-11-09)
 
-Full design, flows and security checklist: `claude/auth-design.md`. Step A (the seam) is in Phase 3; the rest is built in this order. Handlers do not change between steps because they only use `Can(...)`.
+Full design, flows and security checklist: `claude/auth-design.md`. Step A (the seam) is done and is listed in Phase 3; the rest is built in this order. Handlers do not change between steps because they only use `RoleFor` and `role.Can`.
 
-- [ ] **Step B: `token` mode.** `AUTH_MODE=token` and `ADMIN_TOKEN` read from the environment at container start; refuse to start if empty or short; constant-time comparison; rate-limited attempts. Login page on the portal home. Migration `0002`: `users`, `sessions`, nullable `projects.owner_id`; a built-in bootstrap user. Sessions in Postgres (hashed token), HttpOnly Secure SameSite=Lax cookie, `Origin` check for CSRF. Tests for the middleware, the session store and an expired session. Add `AUTH_MODE` and `ADMIN_TOKEN` to `.env.example` and the compose env.
+- [x] **Step A:** `internal/auth` seam with `none` mode (see Done)
+- [ ] **Step B: `token` mode.** `AUTH_MODE=token` and `ADMIN_TOKEN` read from the environment at container start; refuse to start if empty or short; constant-time comparison; rate-limited attempts. Login page on the portal home. Migration `0002`: `users`, `sessions`, nullable `projects.owner_id`; a bootstrap user. `internal/auth` store (interface in `store.go`, `PostgresStore` in `postgres.go`, real-Postgres tests). Sessions in Postgres (hashed token), HttpOnly Secure SameSite=Lax cookie, `Origin` check for CSRF. Tests for the middleware, the session store and an expired session. Add `AUTH_MODE` and `ADMIN_TOKEN` to `.env.example` and the compose env.
 - [ ] **Step C: GitHub login.** `AUTH_MODE=github`: OAuth app (client ID, secret, callback URL in `.env`), authorization code flow with PKCE and `state`, fetch user and primary verified email, `identities(provider, subject)`. "Connect GitHub" for the bootstrap owner attaches the identity to the existing user record. Optional `GITHUB_ALLOWED_ORG` rule (needs `read:org`; may need org-owner approval); configurable API base for GitHub Enterprise Server. Short sessions or a re-check on refresh, since leaving the org does not end a session.
-- [ ] **Step D: members, roles and invites.** `project_members(project_id, user_id, role)` with `viewer` / `editor` / `owner`; `Can` reads it; `ListProjects` returns only projects the user may see; invites table with one-time links (hashed token, expiry, single use), copy-the-link always works, optional SMTP email. Another user's project returns 404.
-- [ ] Decide the open questions in `claude/auth-design.md` section 9 (same-origin portal, session lifetime, role names, `default` fallback once auth is on, SMTP)
+- [ ] **Step D: members, roles and invites.** `project_members(project_id, user_id, role)`; `RoleFor` reads it (gaining `ctx` and `error`, small change at the call sites); `ListProjects` returns only projects the user may see; invites table with one-time links (hashed token, expiry, single use), copy-the-link always works, optional SMTP email. Another user's project returns 404.
+- [ ] Decide the remaining open questions in `claude/auth-design.md` section 10 (session lifetime, `default` fallback once auth is on, SMTP, tool-level admin)
 - [ ] Security checklist from the design doc applied to each step: no tokens, keys or invite links in logs, no open redirect after login, exact callback URLs, hashed tokens with expiries
 
 ## Phase 6b: platform connectors (optional, after the core backend)
@@ -288,6 +297,8 @@ Tasks for it:
 Sources: [A2A protocol contract](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a-protocol-contract.html), [Deploy A2A servers in AgentCore Runtime](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-a2a.html).
 
 ## Phase 7: agent-side events (after the backend above)
+
+The Python and npm SDK design is the next brainstorm (after the project handlers). The items below are the starting points.
 
 - [ ] Proxy forwards `X-Observer-Group` and `X-Observer-Call` to agents
 - [ ] `POST /api/events`, authenticated by the project key; events stored on the matching call and nested in the group detail
