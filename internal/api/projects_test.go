@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -213,5 +214,128 @@ func TestCreateProject(t *testing.T) {
 		if agent.CreatedAt.IsZero() {
 			t.Errorf("stored agent %q has no CreatedAt", agent.Name)
 		}
+	}
+}
+
+func TestCreateProjectErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		setup      func(*fakeStore)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "malformed json",
+			body:       `{"name": `,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_json",
+		},
+		{
+			name:       "wrong type for name",
+			body:       `{"name": 123}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_json",
+		},
+		{
+			name:       "unknown field",
+			body:       `{"name": "Research", "bogus": 1}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_json",
+		},
+		{
+			name:       "body too large",
+			body:       `{"name": "` + strings.Repeat("a", 1<<20) + `"}`,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantCode:   "body_too_large",
+		},
+		{
+			name:       "empty project name",
+			body:       `{"name": "   "}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_name",
+		},
+		{
+			name:       "reserved agent name",
+			body:       `{"name": "Research", "agents": [{"name": "api", "url": "http://localhost:8001"}]}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "reserved_agent_name",
+		},
+		{
+			name:       "invalid upstream url",
+			body:       `{"name": "Research", "agents": [{"name": "news", "url": "ftp://localhost:8001"}]}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_url",
+		},
+		{
+			name: "name already taken",
+			body: `{"name": "research"}`,
+			setup: func(s *fakeStore) {
+				s.projects["prj_seed00000001"] = projects.Project{ID: "prj_seed00000001", Name: "Research"}
+			},
+			wantStatus: http.StatusConflict,
+			wantCode:   "name_taken",
+		},
+		{
+			name: "duplicate agent names",
+			body: `{"name": "Research", "agents": [
+				{"name": "news", "url": "http://localhost:8001"},
+				{"name": "news", "url": "http://localhost:8002"}
+			]}`,
+			wantStatus: http.StatusConflict,
+			wantCode:   "agent_exists",
+		},
+		{
+			name: "store failure",
+			body: `{"name": "Research"}`,
+			setup: func(s *fakeStore) {
+				s.err = errors.New("connection refused: postgres:5432")
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			if tt.setup != nil {
+				tt.setup(store)
+			}
+			before := len(store.projects)
+			h := &handlers{store: store}
+
+			req := httptest.NewRequest("POST", "/api/projects", strings.NewReader(tt.body))
+			rr := httptest.NewRecorder()
+
+			h.createProject(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status: got %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if ct := rr.Result().Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("content type: got %q, want %q", ct, "application/json")
+			}
+
+			var got errorBody
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body is not an error body: %v; body: %s", err, rr.Body.String())
+			}
+			if got.Error.Code != tt.wantCode {
+				t.Errorf("code: got %q, want %q", got.Error.Code, tt.wantCode)
+			}
+			if got.Error.Message == "" {
+				t.Error("message is empty")
+			}
+
+			if strings.Contains(rr.Body.String(), "postgres") {
+				t.Errorf("internal error text leaked to the client: %s", rr.Body.String())
+			}
+
+			if after := len(store.projects); after != before {
+				t.Errorf("a failed request changed the store: %d projects before, %d after", before, after)
+			}
+		})
 	}
 }
