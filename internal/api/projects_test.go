@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/claytonseraphin/agent-observer/internal/auth"
 	"github.com/claytonseraphin/agent-observer/internal/projects"
 )
 
@@ -335,6 +336,187 @@ func TestCreateProjectErrors(t *testing.T) {
 
 			if after := len(store.projects); after != before {
 				t.Errorf("a failed request changed the store: %d projects before, %d after", before, after)
+			}
+		})
+	}
+}
+
+func TestGetProject(t *testing.T) {
+	store := newFakeStore()
+	h := &handlers{store: store}
+	ctx := context.Background()
+
+	news := projects.Agent{Name: "news", URL: "http://host.docker.internal:8001"}
+	finance := projects.Agent{Name: "financial", URL: "http://host.docker.internal:8002"}
+
+	project := projects.Project{
+		ID:      "prj_test1234",
+		Name:    "Research Assistant",
+		KeyHash: "hash1234",
+		KeyHint: "1234",
+	}
+
+	project.Agents = append(project.Agents, news, finance)
+
+	resp, err := store.CreateProject(ctx, project)
+	if err != nil {
+		t.Fatalf("error creating project, %v", err)
+	}
+
+	getProjectReq := httptest.NewRequest("GET", "/api/projects/"+resp.ID, nil)
+	userCtx := auth.ContextWithUser(getProjectReq.Context(), auth.LocalUser())
+	getProjectReq = getProjectReq.WithContext(userCtx)
+	getProjectResponse := httptest.NewRecorder()
+
+	getProjectReq.SetPathValue("id", resp.ID)
+	h.getProject(getProjectResponse, getProjectReq)
+
+	if getProjectResponse.Code != http.StatusOK {
+		t.Fatalf("incorrect status code: got %v, want %v", getProjectResponse.Code, http.StatusOK)
+	}
+	contentType := getProjectResponse.Result().Header.Get("Content-Type")
+	if contentType != "application/json" {
+		t.Fatalf("incorrect Content-Type: got %q, want %q", contentType, "application/json")
+	}
+
+	getProjectBody := getProjectResponse.Body.String()
+	var getProjectResp projectResponse
+	if err := json.Unmarshal(getProjectResponse.Body.Bytes(), &getProjectResp); err != nil {
+		t.Fatalf("error decoding response: %v; body: %v", err, getProjectBody)
+	}
+
+	if getProjectResp.ID != "prj_test1234" {
+		t.Fatalf("incorrect id: got %v, want %v", getProjectResp.ID, "prj_test1234")
+	}
+
+	if getProjectResp.Name != "Research Assistant" {
+		t.Fatalf("incorrect name: got %v, want %v", getProjectResp.Name, "Research Assistant")
+	}
+
+	if getProjectResp.KeyHint != "1234" {
+		t.Fatalf("incorrect key hint: got %v, want %v", getProjectResp.KeyHint, "1234")
+	}
+
+	if getProjectResp.CreatedAt.IsZero() {
+		t.Fatalf("stored project %q has no CreatedAt", getProjectResp.Name)
+	}
+
+	wantAgents := []agentResponse{
+		{Name: "news", URL: "http://host.docker.internal:8001", ProxyPath: "/news/"},
+		{Name: "financial", URL: "http://host.docker.internal:8002", ProxyPath: "/financial/"},
+	}
+
+	if len(getProjectResp.Agents) != len(wantAgents) {
+		t.Fatalf("incorrect number of agents in response: got %d, want %d", len(getProjectResp.Agents), len(wantAgents))
+	}
+
+	for i, want := range wantAgents {
+		got := getProjectResp.Agents[i]
+		if got.Name != want.Name {
+			t.Fatalf("incorrect agent name: got %v, want %v", got.Name, want.Name)
+		}
+
+		if got.URL != want.URL {
+			t.Fatalf("incorrect agent url: got %v, want %v", got.URL, want.URL)
+		}
+
+		if got.ProxyPath != want.ProxyPath {
+			t.Fatalf("incorrect agent proxy path: got %v, want %v", got.ProxyPath, want.ProxyPath)
+		}
+
+		if got.CreatedAt.IsZero() {
+			t.Errorf("stored agent %q has no CreatedAt", got.Name)
+		}
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(getProjectResponse.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("error decoding body as map: %v", err)
+	}
+	for _, field := range []string{"key", "key_hash"} {
+		if _, found := raw[field]; found {
+			t.Errorf("response must not contain %q", field)
+		}
+	}
+}
+
+func TestGetProjectErrors(t *testing.T) {
+	seed := func(s *fakeStore) {
+		s.projects["prj_test1234"] = projects.Project{ID: "prj_test1234", Name: "Research"}
+	}
+
+	tests := []struct {
+		name       string
+		id         string
+		noUser     bool
+		setup      func(*fakeStore)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "unknown id",
+			id:         "prj_missing",
+			wantStatus: http.StatusNotFound,
+			wantCode:   "project_not_found",
+		},
+		{
+			name:       "no user in context",
+			id:         "prj_test1234",
+			noUser:     true,
+			setup:      seed,
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "unauthenticated",
+		},
+		{
+			name: "store failure",
+			id:   "prj_test1234",
+			setup: func(s *fakeStore) {
+				seed(s)
+				s.err = errors.New("connection refused: postgres:5432")
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			if tt.setup != nil {
+				tt.setup(store)
+			}
+			h := &handlers{store: store}
+
+			req := httptest.NewRequest("GET", "/api/projects/"+tt.id, nil)
+			req.SetPathValue("id", tt.id)
+			if !tt.noUser {
+				req = req.WithContext(auth.ContextWithUser(req.Context(), auth.LocalUser()))
+			}
+			rr := httptest.NewRecorder()
+
+			h.getProject(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status: got %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if ct := rr.Result().Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("content type: got %q, want %q", ct, "application/json")
+			}
+
+			var got errorBody
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body is not an error body: %v; body: %s", err, rr.Body.String())
+			}
+			if got.Error.Code != tt.wantCode {
+				t.Errorf("code: got %q, want %q", got.Error.Code, tt.wantCode)
+			}
+			if got.Error.Message == "" {
+				t.Error("message is empty")
+			}
+
+			if strings.Contains(rr.Body.String(), "postgres") {
+				t.Errorf("internal error text leaked to the client: %s", rr.Body.String())
 			}
 		})
 	}
