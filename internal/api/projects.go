@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/claytonseraphin/agent-observer/internal/auth"
 	"github.com/claytonseraphin/agent-observer/internal/projects"
 )
 
@@ -147,7 +148,52 @@ func (h *handlers) createProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) getProject(w http.ResponseWriter, r *http.Request) {
-	return
+	id := r.PathValue("id")
+	user, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "request has no valid user")
+		return
+	}
+
+	role := auth.RoleFor(user, id)
+	if !role.Can(auth.Read) {
+		handleError(
+			w,
+			projects.ErrProjectNotFound,
+		)
+		return
+	}
+
+	response, err := h.store.GetProject(r.Context(), id)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+
+	getProjectResponse := projectResponse{
+		ID:        response.ID,
+		Name:      response.Name,
+		KeyHint:   response.KeyHint,
+		CreatedAt: response.CreatedAt,
+	}
+
+	agents := make([]agentResponse, 0, len(response.Agents))
+	for _, agent := range response.Agents {
+		agents = append(agents, agentResponse{
+			Name:      agent.Name,
+			URL:       agent.URL,
+			ProxyPath: "/" + agent.Name + "/",
+			CreatedAt: agent.CreatedAt,
+		})
+	}
+
+	getProjectResponse.Agents = agents
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(getProjectResponse)
+
 }
 
 func (h *handlers) listProjects(w http.ResponseWriter, r *http.Request) {
