@@ -54,7 +54,7 @@ type projectSummaryResponse struct {
 }
 
 type listProjectsResponse struct {
-	Total    int                      `json:"total"`
+	Count    int                      `json:"total"`
 	Projects []projectSummaryResponse `json:"projects"`
 }
 
@@ -197,7 +197,47 @@ func (h *handlers) getProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) listProjects(w http.ResponseWriter, r *http.Request) {
-	return
+	_, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "request has no valid user")
+		return
+	}
+
+	raw := r.URL.Query().Get("limit")
+	limit, err := parseLimit(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_limit", "limit must be a whole number between 1 and 200")
+		return
+	}
+
+	response, err := h.store.ListProjects(r.Context(), limit)
+	if err != nil {
+		handleError(w, err)
+		return
+	}
+
+	resp := listProjectsResponse{
+		Count:    len(response),
+		Projects: make([]projectSummaryResponse, 0, len(response)),
+	}
+
+	for _, summary := range response {
+		resp.Projects = append(
+			resp.Projects, projectSummaryResponse{
+				ID:         summary.ID,
+				Name:       summary.Name,
+				KeyHint:    summary.KeyHint,
+				AgentCount: summary.AgentCount,
+				CreatedAt:  summary.CreatedAt,
+			},
+		)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	json.NewEncoder(w).Encode(resp)
+
 }
 
 func (h *handlers) deleteProject(w http.ResponseWriter, r *http.Request) {

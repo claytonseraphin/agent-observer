@@ -5,8 +5,9 @@ import (
 )
 
 type fakeStore struct {
-	projects map[string]projects.Project
-	err      error
+	projects  map[string]projects.Project
+	lastLimit int
+	err       error
 }
 
 func newFakeStore() *fakeStore {
