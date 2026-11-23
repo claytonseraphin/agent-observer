@@ -52,6 +52,7 @@ var errorMappings = []errorMapping{
 	{projects.ErrInvalidAgentName, http.StatusBadRequest, "invalid_agent_name"},
 	{projects.ErrReservedAgentName, http.StatusBadRequest, "reserved_agent_name"},
 	{projects.ErrInvalidUpstreamURL, http.StatusBadRequest, "invalid_url"},
+	{errInvalidLimit, http.StatusBadRequest, "invalid_limit"},
 }
 
 func handleError(w http.ResponseWriter, err error) {

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	//"strconv"
 	"testing"
 
 	"github.com/claytonseraphin/agent-observer/internal/auth"
@@ -61,6 +62,7 @@ func (s *fakeStore) GetProject(ctx context.Context, id string) (projects.Project
 }
 
 func (s *fakeStore) ListProjects(ctx context.Context, limit int) ([]projects.ProjectSummary, error) {
+	s.lastLimit = limit
 	if s.err != nil {
 		return []projects.ProjectSummary{}, s.err
 	}
@@ -517,6 +519,310 @@ func TestGetProjectErrors(t *testing.T) {
 
 			if strings.Contains(rr.Body.String(), "postgres") {
 				t.Errorf("internal error text leaked to the client: %s", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestListProjects(t *testing.T) {
+	store := newFakeStore()
+	h := &handlers{store: store}
+	ctx := context.Background()
+
+	news := projects.Agent{Name: "news", URL: "http://host.docker.internal:8001"}
+	finance := projects.Agent{Name: "financial", URL: "http://host.docker.internal:8002"}
+
+	projectOne := projects.Project{
+		ID:      "prj_test1234",
+		Name:    "Research Assistant",
+		KeyHash: "hash1234",
+		KeyHint: "1234",
+	}
+
+	projectOne.Agents = append(projectOne.Agents, news, finance)
+
+	_, err := store.CreateProject(ctx, projectOne)
+	if err != nil {
+		t.Fatalf("error creating project, %v", err)
+	}
+
+	projectTwo := projects.Project{
+		ID:      "prj_test5678",
+		Name:    "Shopping Assistant",
+		KeyHash: "hash5678",
+		KeyHint: "5678",
+	}
+
+	_, err = store.CreateProject(ctx, projectTwo)
+	if err != nil {
+		t.Fatalf("error creating project, %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/projects?limit=60", nil)
+
+	userCtx := auth.ContextWithUser(req.Context(), auth.LocalUser())
+	req = req.WithContext(userCtx)
+
+	rr := httptest.NewRecorder()
+
+	h.listProjects(rr, req)
+
+	if store.lastLimit != 60 {
+		t.Errorf("limit passed to store: got %d, want %d", store.lastLimit, 60)
+	}
+
+	var summaries listProjectsResponse
+
+	contentType := rr.Result().Header.Get("Content-Type")
+	if contentType != "application/json" {
+		t.Fatalf("incorrect content type: got %s, want %s", contentType, "application/json")
+	}
+
+	body := rr.Body.String()
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("incorrect status code: got %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	if err := json.Unmarshal(rr.Body.Bytes(), &summaries); err != nil {
+		t.Fatalf("error decoding the payload: %v, body %v", err, body)
+	}
+
+	var byID = make(map[string]projectSummaryResponse)
+
+	if summaries.Count != 2 {
+		t.Fatalf("incorrect number of project summaries listed: got %d, want %d", summaries.Count, 2)
+	}
+	for _, summary := range summaries.Projects {
+		byID[summary.ID] = summary
+	}
+
+	gotOne, ok := byID["prj_test1234"]
+	if !ok {
+		t.Fatalf("project %s missing from project summaries", "prj_test1234")
+	}
+
+	if gotOne.Name != "Research Assistant" {
+		t.Fatalf("incorrect project name listed for %s: got %s, want %s", "prj_test1234", gotOne.Name, "Research Assistant")
+	}
+
+	if gotOne.KeyHint != "1234" {
+		t.Fatalf("incorrect project key hint listed for %s: got %s, want %s", "Research Assistant", gotOne.KeyHint, "1234")
+	}
+
+	if gotOne.CreatedAt.IsZero() {
+		t.Fatalf("stored project summary %s has no created at", "Research Assistant")
+	}
+
+	if gotOne.AgentCount != 2 {
+		t.Fatalf("incorrect number of agents for %s: got %d, want %d", "Research Assistant", gotOne.AgentCount, 2)
+	}
+
+	gotTwo, ok := byID["prj_test5678"]
+	if !ok {
+		t.Fatalf("project %s missing from project summaries", "prj_test5678")
+	}
+
+	if gotTwo.Name != "Shopping Assistant" {
+		t.Fatalf("incorrect project name listed for %s: got %s, want %s", "prj_test5678", gotTwo.Name, "Shopping Assistant")
+	}
+
+	if gotTwo.KeyHint != "5678" {
+		t.Fatalf("incorrect project key hint listed for %s: got %s, want %s", "Shopping Assistant", gotTwo.KeyHint, "5678")
+	}
+
+	if gotTwo.CreatedAt.IsZero() {
+		t.Fatalf("stored project summary %s has no created at", "Shopping Assistant")
+	}
+
+	if gotTwo.AgentCount != 0 {
+		t.Fatalf("incorrect number of agents for %s: got %d, want %d", gotTwo.Name, gotTwo.AgentCount, 0)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("error decoding body as map: %v", err)
+	}
+
+	list, ok := raw["projects"].([]any)
+	if !ok {
+		t.Fatalf(`"projects" is missing or is not a list: %v`, raw["projects"])
+	}
+
+	for _, item := range list {
+		project, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("project entry is not an object: %v", item)
+		}
+		for _, field := range []string{"key", "key_hash"} {
+			if _, found := project[field]; found {
+				t.Errorf("project must not contain %q", field)
+			}
+		}
+	}
+}
+
+func TestListProjectsEmpty(t *testing.T) {
+	store := newFakeStore()
+	h := &handlers{store: store}
+
+	req := httptest.NewRequest("GET", "/api/projects", nil)
+	userCtx := auth.ContextWithUser(req.Context(), auth.LocalUser())
+	req = req.WithContext(userCtx)
+
+	rr := httptest.NewRecorder()
+
+	h.listProjects(rr, req)
+
+	contentType := rr.Result().Header.Get("Content-Type")
+	if contentType != "application/json" {
+		t.Fatalf("incorect content type: got %s, want %s", contentType, "application/json")
+	}
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("incorrect status code: got %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var response = listProjectsResponse{}
+	body := rr.Body.String()
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("error decoding the payload: %v, body %v", err, body)
+	}
+
+	if response.Count != 0 {
+		t.Fatalf("incorrect number of project summaries: got %d, want %d", response.Count, 0)
+	}
+
+	if response.Projects == nil {
+		t.Errorf("projects should be an empty list, got null; body: %s", body)
+	}
+}
+
+func TestListProjectsErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		noUser     bool
+		setup      func(*fakeStore)
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			name:       "no user in context",
+			url:        "/api/projects",
+			noUser:     true,
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "unauthenticated",
+		},
+		{
+			name:       "no user wins over a bad limit",
+			url:        "/api/projects?limit=abc",
+			noUser:     true,
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "unauthenticated",
+		},
+		{
+			name:       "limit is not a number",
+			url:        "/api/projects?limit=abc",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_limit",
+		},
+		{
+			name:       "limit is zero",
+			url:        "/api/projects?limit=0",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_limit",
+		},
+		{
+			name:       "limit is negative",
+			url:        "/api/projects?limit=-5",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_limit",
+		},
+		{
+			name: "store failure",
+			url:  "/api/projects",
+			setup: func(s *fakeStore) {
+				s.err = errors.New("connection refused: postgres:5432")
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			if tt.setup != nil {
+				tt.setup(store)
+			}
+			h := &handlers{store: store}
+
+			req := httptest.NewRequest("GET", tt.url, nil)
+			if !tt.noUser {
+				req = req.WithContext(auth.ContextWithUser(req.Context(), auth.LocalUser()))
+			}
+			rr := httptest.NewRecorder()
+
+			h.listProjects(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status: got %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			if ct := rr.Result().Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("content type: got %q, want %q", ct, "application/json")
+			}
+
+			var got errorBody
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body is not an error body: %v; body: %s", err, rr.Body.String())
+			}
+			if got.Error.Code != tt.wantCode {
+				t.Errorf("code: got %q, want %q", got.Error.Code, tt.wantCode)
+			}
+			if got.Error.Message == "" {
+				t.Error("message is empty")
+			}
+
+			if strings.Contains(rr.Body.String(), "postgres") {
+				t.Errorf("internal error text leaked to the client: %s", rr.Body.String())
+			}
+
+			if tt.wantCode == "invalid_limit" && store.lastLimit != 0 {
+				t.Errorf("store was called with limit %d, but the request was rejected before it", store.lastLimit)
+			}
+		})
+	}
+}
+
+func TestListProjectsLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		url       string
+		wantLimit int
+	}{
+		{name: "no limit uses the default", url: "/api/projects", wantLimit: 50},
+		{name: "limit is passed through", url: "/api/projects?limit=20", wantLimit: 20},
+		{name: "limit above the max is clamped", url: "/api/projects?limit=500", wantLimit: 200},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			h := &handlers{store: store}
+
+			req := httptest.NewRequest("GET", tt.url, nil)
+			req = req.WithContext(auth.ContextWithUser(req.Context(), auth.LocalUser()))
+			rr := httptest.NewRecorder()
+
+			h.listProjects(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+			}
+			if store.lastLimit != tt.wantLimit {
+				t.Errorf("limit passed to store: got %d, want %d", store.lastLimit, tt.wantLimit)
 			}
 		})
 	}
