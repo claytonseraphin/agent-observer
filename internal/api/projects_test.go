@@ -676,7 +676,7 @@ func TestListProjectsEmpty(t *testing.T) {
 
 	contentType := rr.Result().Header.Get("Content-Type")
 	if contentType != "application/json" {
-		t.Fatalf("incorect content type: got %s, want %s", contentType, "application/json")
+		t.Fatalf("incorrect content type: got %s, want %s", contentType, "application/json")
 	}
 
 	if rr.Code != http.StatusOK {
@@ -823,6 +823,117 @@ func TestListProjectsLimit(t *testing.T) {
 			}
 			if store.lastLimit != tt.wantLimit {
 				t.Errorf("limit passed to store: got %d, want %d", store.lastLimit, tt.wantLimit)
+			}
+		})
+	}
+}
+
+func TestDeleteProject(t *testing.T) {
+	store := newFakeStore()
+	h := &handlers{store: store}
+	ctx := context.Background()
+
+	news := projects.Agent{Name: "news", URL: "http://host.docker.internal:8001"}
+	finance := projects.Agent{Name: "financial", URL: "http://host.docker.internal:8002"}
+
+	project := projects.Project{
+		ID:      "prj_test1234",
+		Name:    "Research Assistant",
+		KeyHash: "hash1234",
+		KeyHint: "1234",
+	}
+
+	project.Agents = append(project.Agents, news, finance)
+
+	project, err := store.CreateProject(ctx, project)
+	if err != nil {
+		t.Fatalf("error creating project, %v", err)
+	}
+
+	req := httptest.NewRequest("DELETE", "/api/projects/"+project.ID, nil)
+	userCtx := auth.ContextWithUser(req.Context(), auth.LocalUser())
+	req = req.WithContext(userCtx)
+	req.SetPathValue("id", project.ID)
+
+	resp := httptest.NewRecorder()
+
+	h.deleteProject(resp, req)
+
+	if resp.Code != http.StatusNoContent {
+		t.Fatalf("incorrect status code: got %d, want %d", resp.Code, http.StatusNoContent)
+	}
+
+	if resp.Body.Len() != 0 {
+		t.Errorf("body should be empty, got: %s", resp.Body.String())
+	}
+
+	if _, found := store.projects[project.ID]; found {
+		t.Errorf("project %s is still in the store after delete", project.ID)
+	}
+
+}
+
+func TestDeleteProjectErrors(t *testing.T) {
+	seed := func(s *fakeStore) {
+		s.projects["prj_test1234"] = projects.Project{ID: "prj_test1234", Name: "Research"}
+	}
+	tests := []struct {
+		name       string
+		id         string
+		noUser     bool
+		setup      func(*fakeStore)
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "unknown id", id: "prj_missing", wantStatus: http.StatusNotFound, wantCode: "project_not_found"},
+		{name: "default project", id: "default", wantStatus: http.StatusConflict, wantCode: "default_protected"},
+		{name: "no user", id: "prj_test1234", noUser: true, setup: seed, wantStatus: http.StatusUnauthorized, wantCode: "unauthenticated"},
+		{
+			name: "store failure",
+			id:   "prj_test1234",
+			setup: func(s *fakeStore) {
+				seed(s)
+				s.err = errors.New("connection refused: postgres:5432")
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantCode:   "internal",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newFakeStore()
+			if tt.setup != nil {
+				tt.setup(store)
+			}
+			before := len(store.projects)
+			h := &handlers{store: store}
+
+			req := httptest.NewRequest("DELETE", "/api/projects/"+tt.id, nil)
+			req.SetPathValue("id", tt.id)
+			if !tt.noUser {
+				req = req.WithContext(auth.ContextWithUser(req.Context(), auth.LocalUser()))
+			}
+			rr := httptest.NewRecorder()
+
+			h.deleteProject(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status: got %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+
+			var got errorBody
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("body is not an error body: %v; body: %s", err, rr.Body.String())
+			}
+			if got.Error.Code != tt.wantCode {
+				t.Errorf("code: got %q, want %q", got.Error.Code, tt.wantCode)
+			}
+			if strings.Contains(rr.Body.String(), "postgres") {
+				t.Errorf("internal error text leaked to the client: %s", rr.Body.String())
+			}
+			if len(store.projects) != before {
+				t.Errorf("a failed delete changed the store: %d projects before, %d after", before, len(store.projects))
 			}
 		})
 	}

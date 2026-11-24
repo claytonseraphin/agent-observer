@@ -241,5 +241,23 @@ func (h *handlers) listProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) deleteProject(w http.ResponseWriter, r *http.Request) {
-	return
+	id := r.PathValue("id")
+	user, found := auth.UserFromContext(r.Context())
+	if !found {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "request has no valid user")
+		return
+	}
+
+	role := auth.RoleFor(user, id)
+	if !role.Can(auth.Delete) {
+		handleError(w, projects.ErrProjectNotFound)
+		return
+	}
+
+	if err := h.store.DeleteProject(r.Context(), id); err != nil {
+		handleError(w, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
